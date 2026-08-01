@@ -42,7 +42,11 @@ add_library(
   dbdiff_core STATIC
   src/core/config.cpp
   src/core/error.cpp
+  src/core/hazard.cpp
   src/core/hash.cpp
+  src/core/migration.cpp
+  src/core/operation.cpp
+  src/core/script.cpp
   src/core/source.cpp
   src/core/version.cpp)
 add_library(dbdiff::core ALIAS dbdiff_core)
