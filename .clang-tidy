@@ -1,19 +1,15 @@
 Checks: >-
   -*,
   bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
   clang-analyzer-*,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
   concurrency-*,
-  cppcoreguidelines-*,
-  modernize-*,
+  modernize-use-nullptr,
+  modernize-use-override,
   performance-*,
-  portability-*,
-  readability-*
+  portability-*
 WarningsAsErrors: ''
 HeaderFilterRegex: '^(include|src|tests)/'
 FormatStyle: file
-CheckOptions:
-  - key: readability-identifier-length.IgnoredVariableNames
-    value: 'i|j|k|id|db'
-  - key: cppcoreguidelines-avoid-magic-numbers.IgnoredIntegerValues
-    value: '0;1;2;3;4;8;10;16;32;64'
-

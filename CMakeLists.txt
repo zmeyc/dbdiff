@@ -38,7 +38,13 @@ else()
   message(FATAL_ERROR "yaml-cpp did not provide a supported CMake target")
 endif()
 
-add_library(dbdiff_core STATIC src/core/version.cpp)
+add_library(
+  dbdiff_core STATIC
+  src/core/config.cpp
+  src/core/error.cpp
+  src/core/hash.cpp
+  src/core/source.cpp
+  src/core/version.cpp)
 add_library(dbdiff::core ALIAS dbdiff_core)
 target_include_directories(dbdiff_core PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(dbdiff_core PUBLIC OpenSSL::Crypto ${DBDIFF_YAML_TARGET})
