@@ -8,8 +8,9 @@ add_executable(
   test_operation.cpp
   test_script.cpp
   test_smoke.cpp
-  test_source.cpp)
-target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_core Catch2::Catch2WithMain)
+  test_source.cpp
+  unit/test_sqlite.cpp)
+target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_sqlite Catch2::Catch2WithMain)
 dbdiff_set_warnings(dbdiff_unit_tests)
 dbdiff_enable_sanitizers(dbdiff_unit_tests)
 
