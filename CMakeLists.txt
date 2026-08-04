@@ -25,6 +25,7 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx>=7.8)
+pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq>=15)
 find_package(SQLite3 3.45 REQUIRED)
 find_package(CLI11 2.4 CONFIG REQUIRED)
 find_package(yaml-cpp 0.8 CONFIG REQUIRED)
@@ -65,7 +66,8 @@ dbdiff_enable_sanitizers(dbdiff_sqlite)
 add_library(dbdiff_postgresql STATIC src/postgresql/backend.cpp)
 add_library(dbdiff::postgresql ALIAS dbdiff_postgresql)
 target_include_directories(dbdiff_postgresql PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
-target_link_libraries(dbdiff_postgresql PUBLIC dbdiff_core PkgConfig::PQXX)
+target_link_libraries(dbdiff_postgresql PUBLIC dbdiff_core PkgConfig::PQXX
+                                         PRIVATE PkgConfig::LIBPQ)
 dbdiff_set_warnings(dbdiff_postgresql)
 dbdiff_enable_sanitizers(dbdiff_postgresql)
 
