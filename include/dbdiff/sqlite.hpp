@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dbdiff/backend.hpp"
+#include "dbdiff/hazard.hpp"
 #include "dbdiff/script.hpp"
 
 #include <cstddef>
@@ -106,6 +107,14 @@ struct SchemaSnapshot {
   bool operator==(const SchemaSnapshot&) const = default;
 };
 
+struct Plan {
+  std::string sql;
+  HazardSet hazards;
+  bool draft{false};
+
+  bool operator==(const Plan&) const = default;
+};
+
 class Database final {
 public:
   [[nodiscard]] static Database temporary();
@@ -130,6 +139,9 @@ private:
 };
 
 [[nodiscard]] std::vector<StatementSpan> scan_statements(std::string_view sql);
+[[nodiscard]] Plan plan(const SchemaSnapshot& from, const SchemaSnapshot& to);
+[[nodiscard]] std::string render_snapshot(const SchemaSnapshot& snapshot);
+[[nodiscard]] bool validate_plan(const SchemaSnapshot& from, const SchemaSnapshot& to);
 [[nodiscard]] BackendKind kind() noexcept;
 
 } // namespace dbdiff::sqlite
