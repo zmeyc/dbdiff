@@ -10,6 +10,7 @@ add_executable(
   test_smoke.cpp
   test_source.cpp
   unit/test_postgresql.cpp
+  unit/test_postgresql_planner.cpp
   unit/test_sqlite.cpp
   unit/test_sqlite_planner.cpp)
 target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_postgresql dbdiff_sqlite

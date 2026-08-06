@@ -162,14 +162,20 @@ TEST_CASE("PostgreSQL snapshot normalization rejects ambiguous catalog state",
   const auto version = pg::ServerVersion{150000, 15, 0};
 
   SECTION("duplicate schema") {
-    CHECK_THROWS_AS(pg::normalize_snapshot({version, {"public", "public"}, {}}), dbdiff::Error);
+    CHECK_THROWS_AS(pg::normalize_snapshot(pg::SchemaSnapshot{.server_version = version,
+                                                              .schemas = {"public", "public"}}),
+                    dbdiff::Error);
   }
   SECTION("metadata schema") {
-    CHECK_THROWS_AS(pg::normalize_snapshot({version, {"_dbdiff"}, {}}), dbdiff::Error);
+    CHECK_THROWS_AS(pg::normalize_snapshot(
+                        pg::SchemaSnapshot{.server_version = version, .schemas = {"_dbdiff"}}),
+                    dbdiff::Error);
   }
   SECTION("table in unknown schema") {
     CHECK_THROWS_AS(
-        pg::normalize_snapshot({version, {"public"}, {pg::Table{.name = {"other", "t"}}}}),
+        pg::normalize_snapshot(pg::SchemaSnapshot{.server_version = version,
+                                                  .schemas = {"public"},
+                                                  .tables = {pg::Table{.name = {"other", "t"}}}}),
         dbdiff::Error);
   }
   SECTION("duplicate column position") {
@@ -181,7 +187,9 @@ TEST_CASE("PostgreSQL snapshot normalization rejects ambiguous catalog state",
                 pg::Column{.position = 1, .name = "b", .type = "integer"},
             },
     };
-    CHECK_THROWS_AS(pg::normalize_snapshot({version, {"public"}, {std::move(table)}}),
+    CHECK_THROWS_AS(pg::normalize_snapshot(pg::SchemaSnapshot{.server_version = version,
+                                                              .schemas = {"public"},
+                                                              .tables = {std::move(table)}}),
                     dbdiff::Error);
   }
   SECTION("generated column without expression") {
@@ -197,7 +205,9 @@ TEST_CASE("PostgreSQL snapshot normalization rejects ambiguous catalog state",
                 },
             },
     };
-    CHECK_THROWS_AS(pg::normalize_snapshot({version, {"public"}, {std::move(table)}}),
+    CHECK_THROWS_AS(pg::normalize_snapshot(pg::SchemaSnapshot{.server_version = version,
+                                                              .schemas = {"public"},
+                                                              .tables = {std::move(table)}}),
                     dbdiff::Error);
   }
   SECTION("identity column with separate default") {
@@ -214,7 +224,9 @@ TEST_CASE("PostgreSQL snapshot normalization rejects ambiguous catalog state",
                 },
             },
     };
-    CHECK_THROWS_AS(pg::normalize_snapshot({version, {"public"}, {std::move(table)}}),
+    CHECK_THROWS_AS(pg::normalize_snapshot(pg::SchemaSnapshot{.server_version = version,
+                                                              .schemas = {"public"},
+                                                              .tables = {std::move(table)}}),
                     dbdiff::Error);
   }
 }

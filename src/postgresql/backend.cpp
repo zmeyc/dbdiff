@@ -1,6 +1,7 @@
 #include "dbdiff/postgresql.hpp"
 
 #include "dbdiff/error.hpp"
+#include "dbdiff/hash.hpp"
 
 #include <libpq-fe.h>
 #include <openssl/rand.h>
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -15,10 +17,13 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -55,6 +60,250 @@ void require_no_nul(const std::string_view value, const std::string_view descrip
   if (contains_nul(value)) {
     throw Error{ErrorCode::configuration, std::string{description} + " must not contain NUL"};
   }
+}
+
+[[noreturn]] void script_error(const std::string& message) {
+  throw Error{ErrorCode::migration, message};
+}
+
+[[nodiscard]] bool ascii_space(const char character) noexcept {
+  return std::isspace(static_cast<unsigned char>(character)) != 0;
+}
+
+[[nodiscard]] bool word_start(const char character) noexcept {
+  const auto value = static_cast<unsigned char>(character);
+  return std::isalpha(value) != 0 || character == '_';
+}
+
+[[nodiscard]] bool word_continue(const char character) noexcept {
+  const auto value = static_cast<unsigned char>(character);
+  return std::isalnum(value) != 0 || character == '_' || character == '$';
+}
+
+[[nodiscard]] char ascii_lower(const char character) noexcept {
+  if (character >= 'A' && character <= 'Z') {
+    return static_cast<char>(character - 'A' + 'a');
+  }
+  return character;
+}
+
+[[nodiscard]] std::string ascii_lower(const std::string_view text) {
+  std::string result;
+  result.reserve(text.size());
+  for (const char character : text) {
+    result.push_back(ascii_lower(character));
+  }
+  return result;
+}
+
+[[nodiscard]] std::size_t consume_line_comment(const std::string_view sql,
+                                               std::size_t position) noexcept {
+  position += 2U;
+  while (position < sql.size() && sql[position] != '\n') {
+    ++position;
+  }
+  return position;
+}
+
+[[nodiscard]] std::size_t consume_block_comment(const std::string_view sql, std::size_t position) {
+  std::size_t depth = 1U;
+  position += 2U;
+  while (position < sql.size()) {
+    if (position + 1U < sql.size() && sql[position] == '/' && sql[position + 1U] == '*') {
+      ++depth;
+      position += 2U;
+      continue;
+    }
+    if (position + 1U < sql.size() && sql[position] == '*' && sql[position + 1U] == '/') {
+      --depth;
+      position += 2U;
+      if (depth == 0U) {
+        return position;
+      }
+      continue;
+    }
+    ++position;
+  }
+  script_error("unterminated block comment in PostgreSQL script");
+}
+
+[[nodiscard]] std::size_t skip_space_and_comments(const std::string_view sql,
+                                                  std::size_t position) {
+  while (position < sql.size()) {
+    if (ascii_space(sql[position])) {
+      ++position;
+      continue;
+    }
+    if (position + 1U < sql.size() && sql[position] == '-' && sql[position + 1U] == '-') {
+      position = consume_line_comment(sql, position);
+      continue;
+    }
+    if (position + 1U < sql.size() && sql[position] == '/' && sql[position + 1U] == '*') {
+      position = consume_block_comment(sql, position);
+      continue;
+    }
+    break;
+  }
+  return position;
+}
+
+[[nodiscard]] bool has_sql(const std::string_view sql) {
+  return skip_space_and_comments(sql, 0U) != sql.size();
+}
+
+[[nodiscard]] std::size_t consume_single_quote(const std::string_view sql, std::size_t position) {
+  const bool escape_string = position > 0U &&
+                             (sql[position - 1U] == 'e' || sql[position - 1U] == 'E') &&
+                             (position == 1U || !word_continue(sql[position - 2U]));
+  ++position;
+  while (position < sql.size()) {
+    if (escape_string && sql[position] == '\\') {
+      position += std::min<std::size_t>(2U, sql.size() - position);
+      continue;
+    }
+    if (sql[position] == '\'') {
+      if (position + 1U < sql.size() && sql[position + 1U] == '\'') {
+        position += 2U;
+        continue;
+      }
+      return position + 1U;
+    }
+    ++position;
+  }
+  script_error("unterminated string literal in PostgreSQL script");
+}
+
+[[nodiscard]] std::size_t consume_double_quote(const std::string_view sql, std::size_t position) {
+  ++position;
+  while (position < sql.size()) {
+    if (sql[position] == '"') {
+      if (position + 1U < sql.size() && sql[position + 1U] == '"') {
+        position += 2U;
+        continue;
+      }
+      return position + 1U;
+    }
+    ++position;
+  }
+  script_error("unterminated quoted identifier in PostgreSQL script");
+}
+
+[[nodiscard]] std::optional<std::string_view>
+dollar_quote_delimiter(const std::string_view sql, const std::size_t position) noexcept {
+  if (sql[position] != '$' || (position != 0U && word_continue(sql[position - 1U]))) {
+    return std::nullopt;
+  }
+  auto end = position + 1U;
+  if (end < sql.size() && sql[end] == '$') {
+    return sql.substr(position, 2U);
+  }
+  if (end >= sql.size() || !word_start(sql[end])) {
+    return std::nullopt;
+  }
+  ++end;
+  while (end < sql.size() &&
+         (std::isalnum(static_cast<unsigned char>(sql[end])) != 0 || sql[end] == '_')) {
+    ++end;
+  }
+  if (end >= sql.size() || sql[end] != '$') {
+    return std::nullopt;
+  }
+  return sql.substr(position, end - position + 1U);
+}
+
+[[nodiscard]] std::size_t consume_dollar_quote(const std::string_view sql,
+                                               const std::size_t position,
+                                               const std::string_view delimiter) {
+  const auto closing = sql.find(delimiter, position + delimiter.size());
+  if (closing == std::string_view::npos) {
+    script_error("unterminated dollar-quoted string in PostgreSQL script");
+  }
+  return closing + delimiter.size();
+}
+
+[[nodiscard]] std::vector<std::string> statement_words(const std::string_view sql,
+                                                       const std::size_t maximum = 8U) {
+  std::vector<std::string> words;
+  std::size_t position = 0U;
+  while (position < sql.size() && words.size() < maximum) {
+    position = skip_space_and_comments(sql, position);
+    if (position >= sql.size()) {
+      break;
+    }
+    if (word_start(sql[position])) {
+      const auto begin = position++;
+      while (position < sql.size() && word_continue(sql[position])) {
+        ++position;
+      }
+      words.push_back(ascii_lower(sql.substr(begin, position - begin)));
+      continue;
+    }
+    if (sql[position] == '\'') {
+      position = consume_single_quote(sql, position);
+      continue;
+    }
+    if (sql[position] == '"') {
+      position = consume_double_quote(sql, position);
+      continue;
+    }
+    if (sql[position] == '$') {
+      if (const auto delimiter = dollar_quote_delimiter(sql, position); delimiter.has_value()) {
+        position = consume_dollar_quote(sql, position, *delimiter);
+        continue;
+      }
+    }
+    ++position;
+  }
+  return words;
+}
+
+[[nodiscard]] StatementKind classify_statement(const std::string_view sql) {
+  const auto words = statement_words(sql, 4U);
+  if (words.empty()) {
+    return StatementKind::unknown;
+  }
+  const auto& first = words.front();
+  if (first == "begin" || (first == "start" && words.size() > 1U && words[1] == "transaction")) {
+    return StatementKind::begin;
+  }
+  if (first == "commit" || first == "end") {
+    return StatementKind::commit;
+  }
+  if (first == "rollback") {
+    return std::ranges::find(words, "to") == words.end() ? StatementKind::rollback
+                                                         : StatementKind::rollback_to_savepoint;
+  }
+  if (first == "savepoint") {
+    return StatementKind::savepoint;
+  }
+  if (first == "release") {
+    return StatementKind::release_savepoint;
+  }
+  if (first == "create" || first == "alter" || first == "drop" || first == "comment" ||
+      first == "grant" || first == "revoke" || first == "security" || first == "label") {
+    return StatementKind::ddl;
+  }
+  if (first == "insert" || first == "update" || first == "delete" || first == "merge" ||
+      first == "copy" || first == "truncate" || first == "with" || first == "call" ||
+      first == "do") {
+    return StatementKind::dml;
+  }
+  if (first == "set" || first == "reset" || first == "discard" || first == "listen" ||
+      first == "unlisten" || first == "notify" || first == "vacuum" || first == "analyze" ||
+      first == "reindex" || first == "cluster" || first == "refresh" || first == "checkpoint") {
+    return StatementKind::session;
+  }
+  if (first == "select" || first == "values" || first == "table" || first == "explain" ||
+      first == "show") {
+    return StatementKind::query;
+  }
+  return StatementKind::unknown;
+}
+
+[[nodiscard]] bool transaction_control(const StatementKind kind) noexcept {
+  return kind == StatementKind::begin || kind == StatementKind::commit ||
+         kind == StatementKind::rollback || kind == StatementKind::savepoint ||
+         kind == StatementKind::release_savepoint || kind == StatementKind::rollback_to_savepoint;
 }
 
 [[nodiscard]] std::string quote_conninfo_value(const std::string_view value) {
@@ -398,9 +647,199 @@ void drop_scratch_database(const ConnectionLocator& provisioning_locator,
   throw Error{ErrorCode::database, "PostgreSQL " + std::string{operation} + " failed"};
 }
 
+[[nodiscard]] bool source_forbidden_ddl(const std::string_view sql) {
+  const auto words = statement_words(sql, 8U);
+  if (words.size() < 2U) {
+    return true;
+  }
+  if (words[0] == "alter" && words[1] == "system") {
+    return true;
+  }
+  if ((words[0] == "create" || words[0] == "alter" || words[0] == "drop") &&
+      (words[1] == "database" || words[1] == "tablespace" || words[1] == "role" ||
+       words[1] == "user" || words[1] == "group" || words[1] == "subscription")) {
+    return true;
+  }
+  return words[0] == "create" && (std::ranges::find(words, "temp") != words.end() ||
+                                  std::ranges::find(words, "temporary") != words.end());
+}
+
+void validate_source_statements(const std::string_view sql,
+                                const std::vector<StatementSpan>& statements) {
+  for (const auto& statement : statements) {
+    if (transaction_control(statement.kind)) {
+      throw Error{ErrorCode::source,
+                  "PostgreSQL declarative sources must not contain transaction control"};
+    }
+    if (statement.kind != StatementKind::ddl) {
+      throw Error{ErrorCode::source,
+                  "PostgreSQL declarative sources may contain only persistent schema DDL"};
+    }
+    const auto text = sql.substr(statement.begin, statement.end - statement.begin);
+    if (source_forbidden_ddl(text)) {
+      throw Error{ErrorCode::source,
+                  "PostgreSQL declarative sources must not contain temporary or server-wide DDL"};
+    }
+  }
+}
+
+[[nodiscard]] bool changes_string_lexing(const std::string_view sql) {
+  const auto words = statement_words(sql, 8U);
+  if (words.empty()) {
+    return false;
+  }
+  if (words[0] == "discard" && words.size() > 1U && words[1] == "all") {
+    return true;
+  }
+  if (words[0] != "set" && words[0] != "reset") {
+    return false;
+  }
+  return std::ranges::find(words, "standard_conforming_strings") != words.end();
+}
+
+void validate_migration_statements(const std::string_view sql,
+                                   const std::vector<StatementSpan>& statements) {
+  for (const auto& statement : statements) {
+    if (statement.kind == StatementKind::query) {
+      throw Error{ErrorCode::migration,
+                  "standalone PostgreSQL queries are not allowed in migrations"};
+    }
+    if (statement.kind == StatementKind::unknown) {
+      throw Error{ErrorCode::migration, "unsupported statement in PostgreSQL migration"};
+    }
+    const auto text = sql.substr(statement.begin, statement.end - statement.begin);
+    const auto words = statement_words(text, 8U);
+    if (statement.kind == StatementKind::commit &&
+        (std::ranges::find(words, "chain") != words.end() ||
+         std::ranges::find(words, "prepared") != words.end())) {
+      throw Error{ErrorCode::migration,
+                  "PostgreSQL migrations require a plain COMMIT transaction boundary"};
+    }
+    if (changes_string_lexing(text)) {
+      throw Error{ErrorCode::migration,
+                  "PostgreSQL migrations must not change standard_conforming_strings"};
+    }
+  }
+}
+
+void rollback_server_transaction_noexcept(pqxx::nontransaction& transaction) noexcept {
+  try {
+    execute_no_rows(transaction, "ROLLBACK;");
+  } catch (const std::exception& error) {
+    static_cast<void>(error);
+  }
+}
+
+void hash_field(Sha256& hash, const std::string_view name, const std::string_view value) {
+  hash.add_length_prefixed(name);
+  hash.add_length_prefixed(value);
+}
+
+void hash_boolean(Sha256& hash, const std::string_view name, const bool value) {
+  hash_field(hash, name, value ? "1" : "0");
+}
+
+void hash_optional(Sha256& hash, const std::string_view name,
+                   const std::optional<std::string>& value) {
+  hash_boolean(hash, "present", value.has_value());
+  if (value.has_value()) {
+    hash_field(hash, name, *value);
+  }
+}
+
+[[nodiscard]] std::string semantic_hash_normalized(const SchemaSnapshot& snapshot) {
+  Sha256 hash;
+  hash.add_length_prefixed("dbdiff.postgresql.schema.v1");
+  for (const auto& schema : snapshot.schemas) {
+    hash_field(hash, "object", "schema");
+    hash_field(hash, "name", schema);
+  }
+  for (const auto& table : snapshot.tables) {
+    hash_field(hash, "object", "table");
+    hash_field(hash, "schema", table.name.schema);
+    hash_field(hash, "name", table.name.name);
+    hash_field(hash, "persistence", std::to_string(static_cast<int>(table.persistence)));
+    hash_boolean(hash, "row_security", table.row_security);
+    hash_boolean(hash, "force_row_security", table.force_row_security);
+    for (const auto& column : table.columns) {
+      hash_field(hash, "child", "column");
+      hash_field(hash, "position", std::to_string(column.position));
+      hash_field(hash, "name", column.name);
+      hash_field(hash, "type", column.type);
+      hash_boolean(hash, "not_null", column.not_null);
+      hash_optional(hash, "default", column.default_expression);
+      hash_field(hash, "identity", std::to_string(static_cast<int>(column.identity)));
+      hash_field(hash, "generated", std::to_string(static_cast<int>(column.generated)));
+      hash_boolean(hash, "collation_present", column.collation.has_value());
+      if (column.collation.has_value()) {
+        hash_field(hash, "collation_schema", column.collation->schema);
+        hash_field(hash, "collation_name", column.collation->name);
+      }
+    }
+  }
+  return hash.finish_hex();
+}
+
 } // namespace
 
 BackendKind kind() noexcept { return BackendKind::postgresql; }
+
+std::vector<StatementSpan> scan_statements(const std::string_view sql) {
+  if (contains_nul(sql)) {
+    script_error("PostgreSQL script contains a NUL byte");
+  }
+
+  std::vector<StatementSpan> statements;
+  std::size_t begin = 0U;
+  std::size_t position = 0U;
+  while (position < sql.size()) {
+    if (sql[position] == '\'') {
+      position = consume_single_quote(sql, position);
+      continue;
+    }
+    if (sql[position] == '"') {
+      position = consume_double_quote(sql, position);
+      continue;
+    }
+    if (position + 1U < sql.size() && sql[position] == '-' && sql[position + 1U] == '-') {
+      position = consume_line_comment(sql, position);
+      continue;
+    }
+    if (position + 1U < sql.size() && sql[position] == '/' && sql[position + 1U] == '*') {
+      position = consume_block_comment(sql, position);
+      continue;
+    }
+    if (sql[position] == '$') {
+      if (const auto delimiter = dollar_quote_delimiter(sql, position); delimiter.has_value()) {
+        position = consume_dollar_quote(sql, position, *delimiter);
+        continue;
+      }
+    }
+    if (sql[position] == ';') {
+      const auto end = position + 1U;
+      const auto text = sql.substr(begin, end - begin);
+      if (has_sql(text)) {
+        statements.push_back(StatementSpan{begin, end, classify_statement(text)});
+      }
+      begin = end;
+      position = end;
+      continue;
+    }
+    ++position;
+  }
+
+  const auto tail = sql.substr(begin);
+  if (has_sql(tail)) {
+    statements.push_back(StatementSpan{begin, sql.size(), classify_statement(tail)});
+  }
+  return statements;
+}
+
+ParsedScript parse_migration(std::string sql) {
+  auto statements = scan_statements(sql);
+  validate_migration_statements(sql, statements);
+  return build_execution_units(std::move(sql), std::move(statements));
+}
 
 ConnectionLocator::ConnectionLocator(std::vector<Option> options) : options_{std::move(options)} {}
 
@@ -655,7 +1094,8 @@ SchemaSnapshot normalize_snapshot(SchemaSnapshot snapshot) {
 
     std::set<std::string> column_names;
     int previous_position = 0;
-    for (const auto& column : table.columns) {
+    int canonical_position = 0;
+    for (auto& column : table.columns) {
       require_no_nul(column.name, "PostgreSQL column name");
       require_no_nul(column.type, "PostgreSQL column type");
       if (column.default_expression.has_value()) {
@@ -684,10 +1124,458 @@ SchemaSnapshot normalize_snapshot(SchemaSnapshot snapshot) {
       if (column.generated != GeneratedStorage::none && !column.default_expression.has_value()) {
         throw Error{ErrorCode::database, "PostgreSQL generated column is missing its expression"};
       }
+      if (column.generated == GeneratedStorage::virtual_column &&
+          snapshot.server_version.major < 18) {
+        throw Error{ErrorCode::unsupported,
+                    "virtual generated columns require PostgreSQL 18 or newer"};
+      }
       previous_position = column.position;
+      column.position = ++canonical_position;
     }
   }
+  snapshot.semantic_hash = semantic_hash_normalized(snapshot);
   return snapshot;
+}
+
+std::string semantic_hash(const SchemaSnapshot& snapshot) {
+  return normalize_snapshot(snapshot).semantic_hash;
+}
+
+namespace {
+
+[[nodiscard]] std::string qualified_sql(const QualifiedName& name) {
+  return quote_identifier(name.schema) + "." + quote_identifier(name.name);
+}
+
+[[nodiscard]] std::string qualified_identity(const QualifiedName& name) {
+  return name.schema + "." + name.name;
+}
+
+[[nodiscard]] std::string column_identity(const QualifiedName& table,
+                                          const std::string_view column) {
+  return qualified_identity(table) + "." + std::string{column};
+}
+
+[[nodiscard]] std::string operation_id(const std::string_view action,
+                                       const std::string_view identity) {
+  std::string input{action};
+  input.push_back('\0');
+  input.append(identity);
+  return "postgresql." + std::string{action} + "." + sha256_hex(input);
+}
+
+[[nodiscard]] std::string render_column_definition(const Column& column) {
+  std::string sql = quote_identifier(column.name) + " " + column.type;
+  if (column.collation.has_value()) {
+    sql += " COLLATE " + qualified_sql(*column.collation);
+  }
+  if (column.generated != GeneratedStorage::none) {
+    sql += " GENERATED ALWAYS AS (" + column.default_expression.value_or(std::string{}) + ") ";
+    sql += column.generated == GeneratedStorage::stored ? "STORED" : "VIRTUAL";
+  } else if (column.identity != IdentityGeneration::none) {
+    sql += column.identity == IdentityGeneration::always ? " GENERATED ALWAYS AS IDENTITY"
+                                                         : " GENERATED BY DEFAULT AS IDENTITY";
+  } else if (column.default_expression.has_value()) {
+    sql += " DEFAULT " + *column.default_expression;
+  }
+  if (column.not_null) {
+    sql += " NOT NULL";
+  }
+  return sql;
+}
+
+[[nodiscard]] std::string render_create_table(const Table& table) {
+  std::ostringstream sql;
+  sql << "CREATE ";
+  if (table.persistence == TablePersistence::unlogged) {
+    sql << "UNLOGGED ";
+  }
+  sql << "TABLE " << qualified_sql(table.name) << " (";
+  for (std::size_t index = 0U; index < table.columns.size(); ++index) {
+    if (index != 0U) {
+      sql << ", ";
+    }
+    sql << render_column_definition(table.columns[index]);
+  }
+  sql << ");";
+  return sql.str();
+}
+
+[[nodiscard]] bool same_column_shape(const Column& left, const Column& right) {
+  return left.type == right.type && left.not_null == right.not_null &&
+         left.default_expression == right.default_expression && left.identity == right.identity &&
+         left.generated == right.generated && left.collation == right.collation;
+}
+
+[[nodiscard]] bool same_table_shape(const Table& left, const Table& right) {
+  if (left.persistence != right.persistence || left.row_security != right.row_security ||
+      left.force_row_security != right.force_row_security ||
+      left.columns.size() != right.columns.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < left.columns.size(); ++index) {
+    if (left.columns[index] != right.columns[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void add_diagnostic(MigrationPlan& migration_plan, std::string diagnostic) {
+  migration_plan.draft = true;
+  if (std::ranges::find(migration_plan.diagnostics, diagnostic) ==
+      migration_plan.diagnostics.end()) {
+    migration_plan.diagnostics.push_back(std::move(diagnostic));
+  }
+}
+
+[[nodiscard]] std::string add_operation(MigrationPlan& migration_plan,
+                                        const std::string_view action,
+                                        const std::string_view identity, std::string sql,
+                                        HazardSet hazards = {},
+                                        std::vector<std::string> dependencies = {}) {
+  const auto id = operation_id(action, identity);
+  migration_plan.operations.push_back(Operation{
+      .id = id,
+      .object_identity = std::string{identity},
+      .dependencies = std::move(dependencies),
+      .transaction_mode = TransactionMode::required,
+      .sql = std::move(sql),
+      .hazards = std::move(hazards),
+      .expected_before = {},
+      .expected_after = {},
+  });
+  return id;
+}
+
+[[nodiscard]] std::map<QualifiedName, const Table*> table_index(const std::vector<Table>& tables) {
+  std::map<QualifiedName, const Table*> result;
+  for (const auto& table : tables) {
+    result.emplace(table.name, &table);
+  }
+  return result;
+}
+
+[[nodiscard]] std::map<std::string, const Column*>
+column_index(const std::vector<Column>& columns) {
+  std::map<std::string, const Column*> result;
+  for (const auto& column : columns) {
+    result.emplace(column.name, &column);
+  }
+  return result;
+}
+
+void plan_row_security(MigrationPlan& migration_plan, const Table& from, const Table& to,
+                       std::vector<std::string> dependencies = {}) {
+  const auto table = qualified_sql(to.name);
+  const auto identity = qualified_identity(to.name);
+  if (from.row_security != to.row_security) {
+    const auto action =
+        to.row_security ? "table.row_security.enable" : "table.row_security.disable";
+    const auto sql =
+        "ALTER TABLE " + table +
+        (to.row_security ? " ENABLE ROW LEVEL SECURITY;" : " DISABLE ROW LEVEL SECURITY;");
+    dependencies = {add_operation(migration_plan, action, identity, sql,
+                                  HazardSet{Hazard::write_lock}, std::move(dependencies))};
+  }
+  if (from.force_row_security != to.force_row_security) {
+    const auto action =
+        to.force_row_security ? "table.row_security.force" : "table.row_security.no_force";
+    const auto sql =
+        "ALTER TABLE " + table +
+        (to.force_row_security ? " FORCE ROW LEVEL SECURITY;" : " NO FORCE ROW LEVEL SECURITY;");
+    static_cast<void>(add_operation(migration_plan, action, identity, sql,
+                                    HazardSet{Hazard::write_lock}, std::move(dependencies)));
+  }
+}
+
+} // namespace
+
+MigrationPlan plan(SchemaSnapshot from, SchemaSnapshot to) {
+  from = normalize_snapshot(std::move(from));
+  to = normalize_snapshot(std::move(to));
+  if (from.server_version.major != to.server_version.major) {
+    throw Error{ErrorCode::unsupported,
+                "PostgreSQL planning requires snapshots from the same server major version"};
+  }
+
+  MigrationPlan migration_plan;
+  const std::set<std::string, std::less<>> from_schemas(from.schemas.begin(), from.schemas.end());
+  const std::set<std::string, std::less<>> to_schemas(to.schemas.begin(), to.schemas.end());
+  const auto from_tables = table_index(from.tables);
+  const auto to_tables = table_index(to.tables);
+
+  std::map<std::string, std::string, std::less<>> schema_create_operations;
+  for (const auto& schema : to_schemas) {
+    if (!from_schemas.contains(schema)) {
+      schema_create_operations.emplace(
+          schema, add_operation(migration_plan, "schema.create", schema,
+                                "CREATE SCHEMA " + quote_identifier(schema) + ";"));
+    }
+  }
+
+  std::set<QualifiedName> possible_table_renames_from;
+  std::set<QualifiedName> possible_table_renames_to;
+  for (const auto& [from_name, from_table] : from_tables) {
+    if (to_tables.contains(from_name)) {
+      continue;
+    }
+    for (const auto& [to_name, to_table] : to_tables) {
+      if (!from_tables.contains(to_name) && same_table_shape(*from_table, *to_table)) {
+        possible_table_renames_from.insert(from_name);
+        possible_table_renames_to.insert(to_name);
+        add_diagnostic(migration_plan, "possible table rename from " + qualified_sql(from_name) +
+                                           " to " + qualified_sql(to_name) +
+                                           "; write an explicit ALTER TABLE ... RENAME migration");
+      }
+    }
+  }
+
+  std::map<std::string, std::vector<std::string>, std::less<>> dropped_table_operations;
+  for (const auto& [name, table] : to_tables) {
+    if (from_tables.contains(name) || possible_table_renames_to.contains(name)) {
+      continue;
+    }
+    std::vector<std::string> dependencies;
+    if (const auto schema = schema_create_operations.find(name.schema);
+        schema != schema_create_operations.end()) {
+      dependencies.push_back(schema->second);
+    }
+    const auto create_id = add_operation(migration_plan, "table.create", qualified_identity(name),
+                                         render_create_table(*table), {}, std::move(dependencies));
+    const Table empty_table{
+        .name = name,
+        .persistence = table->persistence,
+        .row_security = false,
+        .force_row_security = false,
+        .columns = table->columns,
+    };
+    plan_row_security(migration_plan, empty_table, *table, {create_id});
+  }
+
+  for (const auto& [name, from_table] : from_tables) {
+    const auto target = to_tables.find(name);
+    if (target == to_tables.end()) {
+      if (!possible_table_renames_from.contains(name)) {
+        const auto id = add_operation(migration_plan, "table.drop", qualified_identity(name),
+                                      "DROP TABLE " + qualified_sql(name) + " RESTRICT;",
+                                      HazardSet{Hazard::data_loss, Hazard::write_lock});
+        dropped_table_operations[name.schema].push_back(id);
+      }
+      continue;
+    }
+
+    const auto* to_table = target->second;
+    std::vector<std::string> table_dependencies;
+    if (from_table->persistence != to_table->persistence) {
+      const auto sql =
+          "ALTER TABLE " + qualified_sql(name) +
+          (to_table->persistence == TablePersistence::unlogged ? " SET UNLOGGED;" : " SET LOGGED;");
+      table_dependencies = {add_operation(migration_plan, "table.persistence",
+                                          qualified_identity(name), sql,
+                                          HazardSet{Hazard::table_rewrite, Hazard::write_lock})};
+    }
+
+    const auto from_columns = column_index(from_table->columns);
+    const auto to_columns = column_index(to_table->columns);
+    std::set<std::string, std::less<>> possible_column_renames_from;
+    std::set<std::string, std::less<>> possible_column_renames_to;
+    for (const auto& [from_name, from_column] : from_columns) {
+      if (to_columns.contains(from_name)) {
+        continue;
+      }
+      for (const auto& [to_name, to_column] : to_columns) {
+        if (!from_columns.contains(to_name) && same_column_shape(*from_column, *to_column)) {
+          possible_column_renames_from.insert(from_name);
+          possible_column_renames_to.insert(to_name);
+          add_diagnostic(migration_plan,
+                         "possible column rename from " + quote_identifier(from_name) + " to " +
+                             quote_identifier(to_name) + " on " + qualified_sql(name) +
+                             "; write an explicit RENAME COLUMN migration");
+        }
+      }
+    }
+
+    std::vector<std::string> from_common_order;
+    std::vector<std::string> to_common_order;
+    for (const auto& column : from_table->columns) {
+      if (to_columns.contains(column.name)) {
+        from_common_order.push_back(column.name);
+      }
+    }
+    bool saw_added_column = false;
+    std::set<std::string, std::less<>> inserted_columns;
+    for (const auto& column : to_table->columns) {
+      if (from_columns.contains(column.name)) {
+        to_common_order.push_back(column.name);
+        if (saw_added_column) {
+          for (const auto& candidate : to_table->columns) {
+            if (!from_columns.contains(candidate.name) && candidate.position < column.position) {
+              inserted_columns.insert(candidate.name);
+            }
+          }
+        }
+      } else {
+        saw_added_column = true;
+      }
+    }
+    if (from_common_order != to_common_order) {
+      add_diagnostic(migration_plan, "column reordering on " + qualified_sql(name) +
+                                         " cannot be represented safely by PostgreSQL ALTER TABLE");
+    }
+    for (const auto& inserted : inserted_columns) {
+      add_diagnostic(migration_plan,
+                     "column " + quote_identifier(inserted) + " is inserted into the middle of " +
+                         qualified_sql(name) +
+                         "; PostgreSQL ADD COLUMN can only append it without rebuilding the table");
+    }
+
+    for (const auto& column : from_table->columns) {
+      if (!to_columns.contains(column.name) &&
+          !possible_column_renames_from.contains(column.name)) {
+        table_dependencies = {
+            add_operation(migration_plan, "column.drop", column_identity(name, column.name),
+                          "ALTER TABLE " + qualified_sql(name) + " DROP COLUMN " +
+                              quote_identifier(column.name) + " RESTRICT;",
+                          HazardSet{Hazard::data_loss, Hazard::write_lock}, table_dependencies)};
+      }
+    }
+
+    for (const auto& column : to_table->columns) {
+      if (from_columns.contains(column.name) || possible_column_renames_to.contains(column.name) ||
+          inserted_columns.contains(column.name)) {
+        continue;
+      }
+      if (column.not_null && !column.default_expression.has_value() &&
+          column.identity == IdentityGeneration::none &&
+          column.generated == GeneratedStorage::none) {
+        add_diagnostic(migration_plan, "adding NOT NULL column " + quote_identifier(column.name) +
+                                           " to " + qualified_sql(name) +
+                                           " requires an explicit backfill/default migration");
+        continue;
+      }
+      HazardSet hazards{Hazard::write_lock};
+      if (column.default_expression.has_value() || column.generated != GeneratedStorage::none) {
+        hazards.insert(Hazard::table_rewrite);
+      }
+      table_dependencies = {add_operation(migration_plan, "column.add",
+                                          column_identity(name, column.name),
+                                          "ALTER TABLE " + qualified_sql(name) + " ADD COLUMN " +
+                                              render_column_definition(column) + ";",
+                                          std::move(hazards), table_dependencies)};
+    }
+
+    for (const auto& from_column : from_table->columns) {
+      const auto target_column = to_columns.find(from_column.name);
+      if (target_column == to_columns.end()) {
+        continue;
+      }
+      const auto& to_column = *target_column->second;
+      const bool generated_expression_changed =
+          from_column.generated != GeneratedStorage::none &&
+          from_column.default_expression != to_column.default_expression;
+      if (from_column.type != to_column.type || from_column.identity != to_column.identity ||
+          from_column.generated != to_column.generated ||
+          from_column.collation != to_column.collation || generated_expression_changed) {
+        add_diagnostic(migration_plan,
+                       "column " + quote_identifier(from_column.name) + " on " +
+                           qualified_sql(name) +
+                           " changes type, collation, identity, or generation semantics; write an "
+                           "explicit ALTER COLUMN migration with any required USING expression");
+        continue;
+      }
+
+      if (from_column.generated == GeneratedStorage::none &&
+          from_column.identity == IdentityGeneration::none &&
+          from_column.default_expression != to_column.default_expression) {
+        const auto sql = to_column.default_expression.has_value()
+                             ? "ALTER TABLE " + qualified_sql(name) + " ALTER COLUMN " +
+                                   quote_identifier(from_column.name) + " SET DEFAULT " +
+                                   *to_column.default_expression + ";"
+                             : "ALTER TABLE " + qualified_sql(name) + " ALTER COLUMN " +
+                                   quote_identifier(from_column.name) + " DROP DEFAULT;";
+        table_dependencies = {add_operation(
+            migration_plan,
+            to_column.default_expression.has_value() ? "column.default.set" : "column.default.drop",
+            column_identity(name, from_column.name), sql, HazardSet{Hazard::write_lock},
+            table_dependencies)};
+      }
+      if (from_column.not_null != to_column.not_null) {
+        HazardSet hazards{Hazard::write_lock};
+        if (to_column.not_null) {
+          hazards.insert(Hazard::constraint_scan);
+        }
+        const auto sql = "ALTER TABLE " + qualified_sql(name) + " ALTER COLUMN " +
+                         quote_identifier(from_column.name) +
+                         (to_column.not_null ? " SET NOT NULL;" : " DROP NOT NULL;");
+        table_dependencies = {add_operation(
+            migration_plan, to_column.not_null ? "column.not_null.set" : "column.not_null.drop",
+            column_identity(name, from_column.name), sql, std::move(hazards), table_dependencies)};
+      }
+    }
+    plan_row_security(migration_plan, *from_table, *to_table, table_dependencies);
+  }
+
+  for (const auto& schema : from_schemas) {
+    if (to_schemas.contains(schema)) {
+      continue;
+    }
+    const bool blocked_table =
+        std::ranges::any_of(possible_table_renames_from,
+                            [&schema](const QualifiedName& name) { return name.schema == schema; });
+    if (blocked_table) {
+      add_diagnostic(migration_plan,
+                     "schema " + quote_identifier(schema) +
+                         " cannot be dropped while a possible table rename is unresolved");
+      continue;
+    }
+    auto dependencies = dropped_table_operations[schema];
+    static_cast<void>(add_operation(migration_plan, "schema.drop", schema,
+                                    "DROP SCHEMA " + quote_identifier(schema) + " RESTRICT;", {},
+                                    std::move(dependencies)));
+  }
+
+  return migration_plan;
+}
+
+std::string render_plan(const MigrationPlan& migration_plan) {
+  std::ostringstream sql;
+  if (migration_plan.draft) {
+    sql << "-- draft: manual edits required\n";
+    for (const auto& diagnostic : migration_plan.diagnostics) {
+      std::string single_line = diagnostic;
+      std::ranges::replace(single_line, '\n', ' ');
+      sql << "-- TODO: " << single_line << '\n';
+    }
+  }
+  if (migration_plan.operations.empty()) {
+    return sql.str();
+  }
+
+  const auto order = deterministic_operation_order(migration_plan.operations);
+  for (const auto index : order) {
+    if (migration_plan.operations[index].transaction_mode == TransactionMode::forbidden) {
+      throw Error{ErrorCode::unsupported,
+                  "PostgreSQL focused planner cannot render nontransactional operations"};
+    }
+  }
+  sql << "BEGIN;\n";
+  for (const auto index : order) {
+    const auto& operation = migration_plan.operations[index];
+    if (!operation.hazards.empty()) {
+      sql << "-- hazards:";
+      for (const auto hazard : operation.hazards) {
+        sql << ' ' << hazard_name(hazard);
+      }
+      sql << '\n';
+    }
+    sql << operation.sql;
+    if (!operation.sql.ends_with('\n')) {
+      sql << '\n';
+    }
+  }
+  sql << "COMMIT;\n";
+  return sql.str();
 }
 
 SchemaSnapshot introspect_database(const ConnectionLocator& locator,
@@ -703,20 +1591,157 @@ SchemaSnapshot introspect_database(const ConnectionLocator& locator,
   }
 }
 
+struct Database::Impl {
+  std::unique_ptr<pqxx::connection> connection;
+  ServerVersion version;
+
+  Impl(std::unique_ptr<pqxx::connection> database_connection, const ServerVersion server_version)
+      : connection{std::move(database_connection)}, version{server_version} {}
+};
+
+Database::Database(std::unique_ptr<Impl> implementation)
+    : implementation_{std::move(implementation)} {}
+
+Database::~Database() = default;
+
+Database::Database(Database&&) noexcept = default;
+
+Database& Database::operator=(Database&&) noexcept = default;
+
+Database Database::open(const ConnectionLocator& locator) {
+  try {
+    const auto connection_string = locator.connection_string();
+    auto connection = std::make_unique<pqxx::connection>(connection_string.c_str());
+    pqxx::nontransaction transaction{*connection};
+    const auto version = connection_server_version(transaction);
+    execute_no_rows(transaction, "SET standard_conforming_strings TO on");
+    return Database{std::make_unique<Impl>(std::move(connection), version)};
+  } catch (const Error&) {
+    throw;
+  } catch (const std::exception&) {
+    throw_connection_error("connection");
+  }
+}
+
+Database Database::open(const std::string_view locator) {
+  return open(ConnectionLocator::parse(locator));
+}
+
+bool Database::is_open() const noexcept {
+  return implementation_ && implementation_->connection && implementation_->connection->is_open();
+}
+
+const ServerVersion& Database::server_version() const {
+  if (!is_open()) {
+    throw std::logic_error{"PostgreSQL database session is not open"};
+  }
+  return implementation_->version;
+}
+
+SchemaSnapshot Database::introspect(const std::vector<std::string>& managed_schemas) const {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL database session is not open"};
+  }
+  try {
+    return introspect_connection(*implementation_->connection, managed_schemas);
+  } catch (const Error&) {
+    throw;
+  } catch (const std::exception&) {
+    throw_connection_error("schema introspection");
+  }
+}
+
+void Database::execute_source(const std::string_view sql) {
+  execute_sources(std::vector<std::string_view>{sql});
+}
+
+void Database::execute_sources(const std::vector<std::string_view>& sources) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL database session is not open"};
+  }
+
+  std::vector<std::vector<StatementSpan>> source_statements;
+  source_statements.reserve(sources.size());
+  for (const auto source : sources) {
+    auto statements = scan_statements(source);
+    validate_source_statements(source, statements);
+    source_statements.push_back(std::move(statements));
+  }
+
+  try {
+    pqxx::work transaction{*implementation_->connection};
+    for (std::size_t source_index = 0U; source_index < sources.size(); ++source_index) {
+      for (const auto& statement : source_statements[source_index]) {
+        execute_no_rows(transaction, sources[source_index].substr(statement.begin,
+                                                                  statement.end - statement.begin));
+      }
+    }
+    transaction.commit();
+  } catch (const Error&) {
+    throw;
+  } catch (const std::exception&) {
+    throw Error{ErrorCode::execution, "PostgreSQL declarative source execution failed"};
+  }
+}
+
+void Database::execute_sources(const SourceSet& sources) {
+  std::vector<std::string_view> sql;
+  sql.reserve(sources.files.size());
+  for (const auto& source : sources.files) {
+    sql.emplace_back(source.sql);
+  }
+  execute_sources(sql);
+}
+
+void Database::execute_migration(const std::string_view sql) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL database session is not open"};
+  }
+  const auto parsed = parse_migration(std::string{sql});
+
+  pqxx::nontransaction transaction{*implementation_->connection};
+  bool inside_server_transaction = false;
+  try {
+    for (const auto& unit : parsed.units) {
+      for (const auto& statement : unit.statements) {
+        const auto text =
+            std::string_view{parsed.sql}.substr(statement.begin, statement.end - statement.begin);
+        execute_no_rows(transaction, text);
+        if (statement.kind == StatementKind::begin) {
+          inside_server_transaction = true;
+        } else if (statement.kind == StatementKind::commit) {
+          inside_server_transaction = false;
+        }
+      }
+    }
+  } catch (const Error&) {
+    if (inside_server_transaction) {
+      rollback_server_transaction_noexcept(transaction);
+    }
+    throw;
+  } catch (const std::exception&) {
+    if (inside_server_transaction) {
+      rollback_server_transaction_noexcept(transaction);
+    }
+    throw Error{ErrorCode::execution, "PostgreSQL migration execution failed"};
+  }
+}
+
 struct ScratchDatabase::Impl {
   ConnectionLocator provisioning_locator;
   ScratchIdentity identity;
   ServerVersion version;
   std::uint64_t owner_oid{};
-  std::unique_ptr<pqxx::connection> connection;
+  std::unique_ptr<Database> database;
   bool closed{false};
 
   Impl(ConnectionLocator provisioning_locator_value, ScratchIdentity identity_value,
        const ServerVersion server_version, const std::uint64_t provisioning_owner_oid,
-       std::unique_ptr<pqxx::connection> database_connection)
+       Database database_session)
       : provisioning_locator{std::move(provisioning_locator_value)},
         identity{std::move(identity_value)}, version{server_version},
-        owner_oid{provisioning_owner_oid}, connection{std::move(database_connection)} {}
+        owner_oid{provisioning_owner_oid},
+        database{std::make_unique<Database>(std::move(database_session))} {}
 
   ~Impl() {
     if (!closed) {
@@ -732,7 +1757,7 @@ struct ScratchDatabase::Impl {
     if (closed) {
       return;
     }
-    connection.reset();
+    database.reset();
     drop_scratch_database(provisioning_locator, identity, owner_oid);
     closed = true;
   }
@@ -767,12 +1792,10 @@ ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_lo
                                        identity.marker.quoted());
     }
 
-    auto database_locator = provisioning_locator.with_database(identity.name.value());
-    const auto database_connection_string = database_locator.connection_string();
-    auto database_connection =
-        std::make_unique<pqxx::connection>(database_connection_string.c_str());
+    const auto database_locator = provisioning_locator.with_database(identity.name.value());
+    auto database = Database::open(database_locator);
     return ScratchDatabase{std::make_unique<Impl>(provisioning_locator, identity, version,
-                                                  owner_oid, std::move(database_connection))};
+                                                  owner_oid, std::move(database))};
   } catch (const Error& error) {
     if (database_created && !try_creation_cleanup(provisioning_locator, identity, owner_oid)) {
       throw Error{error.code(),
@@ -813,20 +1836,43 @@ const ServerVersion& ScratchDatabase::server_version() const {
 }
 
 bool ScratchDatabase::is_open() const noexcept {
-  return implementation_ && !implementation_->closed && implementation_->connection;
+  return implementation_ && !implementation_->closed && implementation_->database &&
+         implementation_->database->is_open();
 }
 
 SchemaSnapshot ScratchDatabase::introspect(const std::vector<std::string>& managed_schemas) const {
   if (!is_open()) {
     throw Error{ErrorCode::database, "PostgreSQL scratch database is closed"};
   }
-  try {
-    return introspect_connection(*implementation_->connection, managed_schemas);
-  } catch (const Error&) {
-    throw;
-  } catch (const std::exception&) {
-    throw_connection_error("scratch schema introspection");
+  return implementation_->database->introspect(managed_schemas);
+}
+
+void ScratchDatabase::execute_source(const std::string_view sql) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL scratch database is closed"};
   }
+  implementation_->database->execute_source(sql);
+}
+
+void ScratchDatabase::execute_sources(const std::vector<std::string_view>& sources) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL scratch database is closed"};
+  }
+  implementation_->database->execute_sources(sources);
+}
+
+void ScratchDatabase::execute_sources(const SourceSet& sources) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL scratch database is closed"};
+  }
+  implementation_->database->execute_sources(sources);
+}
+
+void ScratchDatabase::execute_migration(const std::string_view sql) {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL scratch database is closed"};
+  }
+  implementation_->database->execute_migration(sql);
 }
 
 void ScratchDatabase::close() {
