@@ -1,0 +1,9 @@
+add_executable(dbdiff_docker_integration_tests docker_scratch.cpp)
+target_link_libraries(dbdiff_docker_integration_tests PRIVATE dbdiff_core Catch2::Catch2WithMain)
+dbdiff_set_warnings(dbdiff_docker_integration_tests)
+dbdiff_enable_sanitizers(dbdiff_docker_integration_tests)
+
+catch_discover_tests(
+  dbdiff_docker_integration_tests
+  TEST_PREFIX "integration.docker."
+  PROPERTIES LABELS integration.docker)

@@ -3,6 +3,7 @@ include(Catch)
 add_executable(
   dbdiff_unit_tests
   test_config.cpp
+  unit/test_docker.cpp
   test_hash.cpp
   test_migration.cpp
   test_operation.cpp
@@ -19,3 +20,7 @@ dbdiff_set_warnings(dbdiff_unit_tests)
 dbdiff_enable_sanitizers(dbdiff_unit_tests)
 
 catch_discover_tests(dbdiff_unit_tests)
+
+if(DBDIFF_BUILD_INTEGRATION_TESTS)
+  add_subdirectory(integration)
+endif()

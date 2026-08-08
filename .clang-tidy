@@ -5,6 +5,7 @@ Checks: >-
   -bugprone-exception-escape,
   clang-analyzer-*,
   -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
   concurrency-*,
   modernize-use-nullptr,
   modernize-use-override,

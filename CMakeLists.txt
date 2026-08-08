@@ -42,6 +42,7 @@ endif()
 add_library(
   dbdiff_core STATIC
   src/core/config.cpp
+  src/core/docker.cpp
   src/core/error.cpp
   src/core/hazard.cpp
   src/core/hash.cpp
