@@ -105,7 +105,7 @@ TEST_CASE("configuration discovery stops at the nearest Git root", "[unit][CFG-0
 }
 
 TEST_CASE("locator inference, environment resolution, and redaction are deterministic",
-          "[unit][CFG-002]") {
+          "[unit][CFG-002][CFG-003]") {
   CHECK(dbdiff::infer_backend("postgresql://localhost/db") == dbdiff::BackendKind::postgresql);
   CHECK(dbdiff::infer_backend("POSTGRES://localhost/db") == dbdiff::BackendKind::postgresql);
   CHECK(dbdiff::infer_backend("sqlite:relative.db") == dbdiff::BackendKind::sqlite);

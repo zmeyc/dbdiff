@@ -1,0 +1,3 @@
+# Utilities are intentionally separate from authentication objects.
+00_meta.sql
+auth/auth.dbdiff-schema

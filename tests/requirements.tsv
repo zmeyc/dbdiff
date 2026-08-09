@@ -1,0 +1,74 @@
+id	area	requirement	unit_target	integration_target	manual_scenario
+CLI-001	cli	Commands, help, version, and invalid option combinations are deterministic	unit:CLI-001	integration:CLI-001	-
+CLI-002	cli	Exit codes distinguish convergence, required action, and operational failure	unit:CLI-002	integration:CLI-002	004_sqlite_drift_isolation
+CFG-001	configuration	Strict YAML, discovery boundary, and config-relative paths	unit:CFG-001	integration:CFG-001	-
+CFG-002	configuration	CLI precedence, locator inference, and command-specific target requirements	unit:CFG-002	integration:CFG-002	010_postgresql_initial
+CFG-003	configuration	Credentials are redacted from diagnostics and stored run metadata	unit:CFG-003	integration:CFG-003	-
+CFG-004	configuration	Explicit alternative configs remain independent and are never merged	unit:CFG-004	integration:CFG-004	-
+SRC-001	sources	Repeated files, directories, stdin, and normalized lexical ordering resolve deterministically	unit:SRC-001	integration:SRC-001	002_sqlite_multifile_manifest
+SRC-002	sources	Root and nested manifests preserve declared order	unit:SRC-002	integration:SRC-002	002_sqlite_multifile_manifest
+SRC-003	sources	Cycles, duplicates, symlinks, traversal, globs, invalid bytes, and migration overlap are rejected	unit:SRC-003	integration:SRC-003	002_sqlite_multifile_manifest
+SRC-004	sources	Exact source hashes and semantic schema hashes remain distinct	unit:SRC-004	integration:SRC-004	002_sqlite_multifile_manifest
+SRC-005	sources	Master input rejects DML, transaction control, database operations, client commands, and metadata writes	unit:SRC-005	integration:SRC-005	-
+CRE-001	create	Create never constructs or opens the configured live target	unit:CRE-001	integration:CRE-001	001_sqlite_initial
+CRE-002	create	History and master are independently reconstructed in fresh empty databases	unit:CRE-002	integration:CRE-002	010_postgresql_initial
+CRE-003	create	Candidate application converges history to master before atomic save	unit:CRE-003	integration:CRE-003	001_sqlite_initial
+CRE-004	create	An unchanged semantic schema creates no migration	unit:CRE-004	integration:CRE-004	001_sqlite_initial
+CRE-005	create	Draft migrations retain editable work but cannot apply while marked draft	unit:CRE-005	integration:CRE-005	-
+PLN-001	planner	Operation DAG ordering and cycle diagnostics are deterministic	unit:PLN-001	integration:PLN-001	-
+PLN-002	planner	Rename suggestions do not execute without an exact mapping	unit:PLN-002	integration:PLN-002	-
+PLN-003	planner	Every typed hazard requires an exact SQL-file approval	unit:PLN-003	integration:PLN-003	003_sqlite_rebuild_preserves_data
+PLN-004	planner	Unsupported, unobserved, ambiguous, or unverifiable changes fail closed	unit:PLN-004	integration:PLN-004	-
+SQL-001	sql	PostgreSQL strings, identifiers, dollar bodies, nested comments, and savepoints split correctly	unit:SQL-001	integration:SQL-001	-
+SQL-002	sql	SQLite trigger bodies and statements split through SQLite parser APIs	unit:SQL-002	integration:SQL-002	001_sqlite_initial
+SQL-003	sql	Visible transaction edits are honored and standalone DML is rejected	unit:SQL-003	integration:SQL-003	005_sqlite_resume_recover
+MIG-001	migration	Metadata, filenames, backend, engine version, ordering, and checksums are validated	unit:MIG-001	integration:MIG-001	001_sqlite_initial
+MIG-002	migration	Checkpoint state reconciles failure before and after every commit boundary	unit:MIG-002	integration:MIG-002	005_sqlite_resume_recover
+MIG-003	migration	Completed unit bytes, order, and boundaries are immutable during resume	unit:MIG-003	integration:MIG-003	005_sqlite_resume_recover
+MIG-004	migration	Exact attempted SQL revisions can be listed and recovered from the database	unit:MIG-004	integration:MIG-004	005_sqlite_resume_recover
+MIG-005	migration	Generated BEGIN and COMMIT remain visible and no hidden transaction boundary is added	unit:MIG-005	integration:MIG-005	001_sqlite_initial
+APP-001	apply	Applied prefix, complete history, and master reconstruction gates run before live writes	unit:APP-001	integration:APP-001	001_sqlite_initial
+APP-002	apply	Live schema is compared only with its reconstructed applied prefix	unit:APP-002	integration:APP-002	004_sqlite_drift_isolation
+APP-003	apply	Live drift blocks apply and never becomes generated repair SQL	unit:APP-003	integration:APP-003	004_sqlite_drift_isolation
+APP-004	apply	Locks are acquired on pinned ownership and history and drift checks are repeated	unit:APP-004	integration:APP-004	-
+APP-005	apply	Dry-run writes neither target schema nor migration history	unit:APP-005	integration:APP-005	001_sqlite_initial
+APP-006	apply	Status, create-database, read-only migration directories, and recover behave as documented	unit:APP-006	integration:APP-006	005_sqlite_resume_recover
+SQT-001	sqlite	Managed table, column, constraint, index, view, and trigger properties round-trip semantically	unit:SQT-001	integration:SQT-001	001_sqlite_initial
+SQT-002	sqlite	Native additions and confirmed renames use supported ALTER operations	unit:SQT-002	integration:SQT-002	-
+SQT-003	sqlite	Transactional rebuilds preserve mapped data, rowids, sequence state, and dependents	unit:SQT-003	integration:SQT-003	003_sqlite_rebuild_preserves_data
+SQT-004	sqlite	Temporary, attached, virtual, shadow, extension-dependent, and unsafe operations are rejected	unit:SQT-004	integration:SQT-004	-
+SQT-005	sqlite	Writer locking, busy timeout, WAL, rollback journal, and concurrent execution are safe	unit:SQT-005	integration:SQT-005	-
+SQT-006	sqlite	Online-backup data validation catches row failures without influencing generated SQL	unit:SQT-006	integration:SQT-006	003_sqlite_rebuild_preserves_data
+SQT-010	sqlite	Ordinary rowid, STRICT, and WITHOUT ROWID table properties round-trip	unit:SQT-010	integration:SQT-010	003_sqlite_rebuild_preserves_data
+SQT-011	sqlite	Declared types, defaults, collations, and generated column properties round-trip	unit:SQT-011	integration:SQT-011	003_sqlite_rebuild_preserves_data
+SQT-012	sqlite	Primary, unique, check, and foreign-key constraint properties round-trip	unit:SQT-012	integration:SQT-012	003_sqlite_rebuild_preserves_data
+SQT-013	sqlite	AUTOINCREMENT and accessible rowid state are preserved exactly	unit:SQT-013	integration:SQT-013	003_sqlite_rebuild_preserves_data
+SQT-014	sqlite	Expression and partial index definitions round-trip	unit:SQT-014	integration:SQT-014	001_sqlite_initial
+SQT-015	sqlite	View definitions and multi-statement trigger bodies round-trip	unit:SQT-015	integration:SQT-015	001_sqlite_initial
+PG-001	postgresql	All managed PostgreSQL object properties round-trip on every supported major	unit:PG-001	integration:PG-001	-
+PG-002	postgresql	Create, change, drop, and dependency ordering converge for every managed object	unit:PG-002	integration:PG-002	-
+PG-003	postgresql	Online phases and transaction-forbidden statements retain visible valid boundaries	unit:PG-003	integration:PG-003	-
+PG-004	postgresql	External ownership and unsupported or extension-owned effects fail closed	unit:PG-004	integration:PG-004	-
+PG-005	postgresql	PostgreSQL 15 through 18 and database-creation setting gates are enforced	unit:PG-005	integration:PG-005	-
+PG-010	postgresql	Managed schemas round-trip with stable logical identities	unit:PG-010	integration:PG-010	010_postgresql_initial
+PG-011	postgresql	Enum labels and complete domain definitions round-trip	unit:PG-011	integration:PG-011	-
+PG-012	postgresql	All sequence properties and ownership relationships round-trip	unit:PG-012	integration:PG-012	-
+PG-013	postgresql	Ordinary table, column, default, identity, and generated properties round-trip	unit:PG-013	integration:PG-013	010_postgresql_initial
+PG-014	postgresql	Primary, unique, check, and foreign-key constraint properties round-trip	unit:PG-014	integration:PG-014	-
+PG-015	postgresql	Expression, partial, INCLUDE, uniqueness, and method index properties round-trip	unit:PG-015	integration:PG-015	-
+PG-016	postgresql	View definitions and all managed security options round-trip	unit:PG-016	integration:PG-016	-
+PG-017	postgresql	Materialized view definitions and population state round-trip	unit:PG-017	integration:PG-017	-
+PG-018	postgresql	Functions and procedures preserve identity, language, body, and managed attributes	unit:PG-018	integration:PG-018	-
+PG-019	postgresql	Trigger definitions and managed comments round-trip	unit:PG-019	integration:PG-019	-
+PG-020	postgresql	Row-level-security flags and policy command, roles, expressions, and permissiveness round-trip	unit:PG-020	integration:PG-020	-
+SCR-001	scratch	Scratch databases use template0, UUID names, ownership markers, and guarded cleanup	unit:SCR-001	integration:SCR-001	010_postgresql_initial
+SCR-002	scratch	Docker scratch uses labels, random credentials and ports, readiness, and idempotent discovery	unit:SCR-002	integration:SCR-002	-
+SCR-003	scratch	Existing-server bootstrap creates only the dedicated role and maintenance database	unit:SCR-003	integration:SCR-003	-
+SCR-004	scratch	Expired scratch cleanup removes only entries passing every ownership check	unit:SCR-004	integration:SCR-004	-
+SCR-005	scratch	Docker scratch honors a configured custom image without weakening ownership checks	unit:SCR-005	integration:SCR-005	-
+UPG-001	upgrade	New-major replay independently validates history and master	unit:UPG-001	integration:UPG-001	-
+UPG-002	upgrade	A no-schema transition gates ordinary create until prepared	unit:UPG-002	integration:UPG-002	-
+UPG-003	upgrade	Transition apply refuses old targets, version mismatch, and downgrades	unit:UPG-003	integration:UPG-003	-
+UPG-004	upgrade	Post-upgrade live state must equal reconstruction on the new major	unit:UPG-004	integration:UPG-004	-
+OPS-001	operations	Timeout, cancellation, disconnect, and injected failures clean owned resources	unit:OPS-001	integration:OPS-001	-
+OPS-002	operations	Concurrent executors serialize without stealing ownership	unit:OPS-002	integration:OPS-002	-

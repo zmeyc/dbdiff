@@ -5,7 +5,7 @@
 
 #include <vector>
 
-TEST_CASE("operation ordering is topological and deterministic") {
+TEST_CASE("operation ordering is topological and deterministic", "[unit][PLN-001]") {
   const std::vector<dbdiff::Operation> operations{
       {.id = "table", .dependencies = {"schema"}},
       {.id = "z_independent"},
@@ -17,7 +17,7 @@ TEST_CASE("operation ordering is topological and deterministic") {
   CHECK(order == std::vector<std::size_t>{3, 2, 0, 4, 1});
 }
 
-TEST_CASE("operation ordering rejects invalid dependency graphs") {
+TEST_CASE("operation ordering rejects invalid dependency graphs", "[unit][PLN-001]") {
   CHECK_THROWS_AS(dbdiff::deterministic_operation_order({{{.id = ""}}}), dbdiff::Error);
   CHECK_THROWS_AS(dbdiff::deterministic_operation_order({{{.id = "a"}, {.id = "a"}}}),
                   dbdiff::Error);

@@ -17,7 +17,7 @@ dbdiff::StatementSpan span(const std::string& sql, const std::string& statement,
 
 } // namespace
 
-TEST_CASE("execution units preserve visible transaction boundaries") {
+TEST_CASE("execution units preserve visible transaction boundaries", "[unit][SQL-003][MIG-005]") {
   const std::string sql = "BEGIN;\nCREATE TABLE a(id INT);\nCOMMIT;\nCREATE INDEX i ON a(id);\n";
   auto parsed = dbdiff::build_execution_units(
       sql, {span(sql, "BEGIN;", dbdiff::StatementKind::begin),
@@ -34,7 +34,7 @@ TEST_CASE("execution units preserve visible transaction boundaries") {
         "BEGIN;\nCREATE TABLE a(id INT);\nCOMMIT;");
 }
 
-TEST_CASE("execution units reject ambiguous transaction control") {
+TEST_CASE("execution units reject ambiguous transaction control", "[unit][SQL-003]") {
   const std::string nested = "BEGIN; BEGIN; COMMIT;";
   CHECK_THROWS_AS(dbdiff::build_execution_units(
                       nested, {span(nested, "BEGIN;", dbdiff::StatementKind::begin),
@@ -59,7 +59,7 @@ TEST_CASE("execution units reject ambiguous transaction control") {
                   dbdiff::Error);
 }
 
-TEST_CASE("standalone DML and overlapping statement spans are rejected") {
+TEST_CASE("standalone DML and overlapping statement spans are rejected", "[unit][SQL-003]") {
   const std::string sql = "INSERT INTO t VALUES (1);";
   CHECK_THROWS_AS(dbdiff::build_execution_units(sql, {span(sql, sql, dbdiff::StatementKind::dml)}),
                   dbdiff::Error);
@@ -68,7 +68,7 @@ TEST_CASE("standalone DML and overlapping statement spans are rejected") {
                   dbdiff::Error);
 }
 
-TEST_CASE("a completed execution prefix cannot be edited") {
+TEST_CASE("a completed execution prefix cannot be edited", "[unit][MIG-003]") {
   const std::string sql = "CREATE TABLE a(id INT); CREATE TABLE b(id INT);";
   const auto parsed = dbdiff::build_execution_units(
       sql, {span(sql, "CREATE TABLE a(id INT);", dbdiff::StatementKind::ddl),
