@@ -9,9 +9,14 @@
 
 #include <sqlite3.h>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -25,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -37,6 +43,62 @@ struct ProjectInputs {
   std::vector<MigrationFile> migrations;
 };
 
+[[noreturn]] void lifecycle_error(const ErrorCode code, const std::string& message) {
+  throw Error{code, message};
+}
+
+class ProjectLifecycleLock final {
+public:
+  ProjectLifecycleLock(const std::filesystem::path& config_file,
+                       const std::chrono::milliseconds timeout) {
+    descriptor_ = ::open(config_file.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor_ == -1) {
+      lifecycle_error(ErrorCode::configuration,
+                      "cannot open configuration file for lifecycle locking");
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    constexpr auto poll_interval = std::chrono::milliseconds{10};
+    while (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
+      const auto lock_error = errno;
+      if (lock_error != EWOULDBLOCK && lock_error != EAGAIN && lock_error != EINTR) {
+        close_descriptor();
+        lifecycle_error(ErrorCode::database, "project lifecycle lock acquisition failed");
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        close_descriptor();
+        lifecycle_error(ErrorCode::database, "project lifecycle lock acquisition timed out");
+      }
+      const auto poll =
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(poll_interval);
+      std::this_thread::sleep_for(std::min(deadline - now, poll));
+    }
+  }
+
+  ProjectLifecycleLock(const ProjectLifecycleLock&) = delete;
+  ProjectLifecycleLock& operator=(const ProjectLifecycleLock&) = delete;
+  ProjectLifecycleLock(ProjectLifecycleLock&&) = delete;
+  ProjectLifecycleLock& operator=(ProjectLifecycleLock&&) = delete;
+
+  ~ProjectLifecycleLock() {
+    if (descriptor_ != -1) {
+      static_cast<void>(::flock(descriptor_, LOCK_UN));
+      close_descriptor();
+    }
+  }
+
+private:
+  void close_descriptor() noexcept {
+    if (descriptor_ != -1) {
+      static_cast<void>(::close(descriptor_));
+      descriptor_ = -1;
+    }
+  }
+
+  int descriptor_{-1};
+};
+
 sqlite::ConnectionSettings sqlite_settings(const Config& config) {
   return sqlite::ConnectionSettings{config.lock_timeout, config.statement_timeout};
 }
@@ -45,12 +107,7 @@ postgresql::ConnectionSettings postgresql_settings(const Config& config) {
   return postgresql::ConnectionSettings{config.lock_timeout, config.statement_timeout};
 }
 
-[[noreturn]] void lifecycle_error(const ErrorCode code, const std::string& message) {
-  throw Error{code, message};
-}
-
-ProjectInputs load_inputs(const std::filesystem::path& config_file, const Runtime& runtime) {
-  auto config = load_config(config_file);
+ProjectInputs load_inputs(Config config, const Runtime& runtime) {
   SourceResolver resolver{config.file.parent_path(), config.migrations, runtime.stdin_reader};
   auto sources = resolver.resolve(config.sources);
   auto migrations = load_migrations(config.migrations, config.backend);
@@ -748,6 +805,7 @@ ApplyResult apply_postgresql(ProjectInputs& project, const ApplyOptions& options
 
   auto target = postgresql::Database::open(require_target_locator(project.config, runtime),
                                            postgresql_settings(project.config));
+  const auto lifecycle_lock = target.acquire_lifecycle_lock();
   if (target.server_version().major != desired.server_version.major) {
     lifecycle_error(ErrorCode::unsupported,
                     "target and scratch PostgreSQL major versions must match");
@@ -803,6 +861,7 @@ StatusResult status_postgresql(ProjectInputs& project, const Runtime& runtime) {
   const auto desired = require_complete_postgresql_reconstruction(project, provisioning);
   auto target = postgresql::Database::open(require_target_locator(project.config, runtime),
                                            postgresql_settings(project.config));
+  const auto lifecycle_lock = target.acquire_lifecycle_lock();
   if (target.server_version().major != desired.server_version.major) {
     lifecycle_error(ErrorCode::unsupported,
                     "target and scratch PostgreSQL major versions must match");
@@ -922,7 +981,9 @@ void require_hazard_approvals(const HazardSet& required, const HazardSet& allowe
 }
 
 CreateResult create_migration(const CreateOptions& options, const Runtime& runtime) {
-  auto project = load_inputs(options.config_file, runtime);
+  auto config = load_config(options.config_file);
+  const ProjectLifecycleLock lifecycle_lock{config.file, config.lock_timeout};
+  auto project = load_inputs(std::move(config), runtime);
   if (project.config.backend == BackendKind::sqlite) {
     return create_sqlite(project, options, runtime);
   }
@@ -930,7 +991,9 @@ CreateResult create_migration(const CreateOptions& options, const Runtime& runti
 }
 
 ApplyResult apply_migrations(const ApplyOptions& options, const Runtime& runtime) {
-  auto project = load_inputs(options.config_file, runtime);
+  auto config = load_config(options.config_file);
+  const ProjectLifecycleLock lifecycle_lock{config.file, config.lock_timeout};
+  auto project = load_inputs(std::move(config), runtime);
   if (project.config.backend == BackendKind::sqlite) {
     return apply_sqlite(project, options, runtime);
   }
@@ -938,7 +1001,9 @@ ApplyResult apply_migrations(const ApplyOptions& options, const Runtime& runtime
 }
 
 StatusResult project_status(const std::filesystem::path& config_file, const Runtime& runtime) {
-  auto project = load_inputs(config_file, runtime);
+  auto config = load_config(config_file);
+  const ProjectLifecycleLock lifecycle_lock{config.file, config.lock_timeout};
+  auto project = load_inputs(std::move(config), runtime);
   if (project.config.backend == BackendKind::sqlite) {
     return status_sqlite(project, runtime);
   }
@@ -951,6 +1016,7 @@ std::vector<RecoveredRevision> recover_migration(const RecoverOptions& options,
     lifecycle_error(ErrorCode::configuration, "recover requires a migration version");
   }
   const auto config = load_config(options.config_file);
+  const ProjectLifecycleLock lifecycle_lock{config.file, config.lock_timeout};
   if (config.backend == BackendKind::sqlite) {
     const auto path = sqlite_target_path(config, runtime);
     if (!sqlite_target_exists(path)) {
@@ -961,8 +1027,9 @@ std::vector<RecoveredRevision> recover_migration(const RecoverOptions& options,
     return convert_revisions(target.recover_revisions(options.version), options.version);
   }
 
-  const auto target = postgresql::Database::open(require_target_locator(config, runtime),
-                                                 postgresql_settings(config));
+  auto target = postgresql::Database::open(require_target_locator(config, runtime),
+                                           postgresql_settings(config));
+  const auto target_lock = target.acquire_lifecycle_lock();
   return convert_revisions(target.recover_revisions(options.version), options.version);
 }
 

@@ -281,6 +281,24 @@ validate_migration_resume(const std::optional<MigrationHistoryEntry>& history,
                           const ParsedScript& candidate, std::string_view exact_file_sha256,
                           bool resume);
 
+class LifecycleLock final {
+public:
+  LifecycleLock(LifecycleLock&&) noexcept;
+  LifecycleLock& operator=(LifecycleLock&&) noexcept;
+  LifecycleLock(const LifecycleLock&) = delete;
+  LifecycleLock& operator=(const LifecycleLock&) = delete;
+  ~LifecycleLock();
+
+private:
+  struct Impl;
+
+  explicit LifecycleLock(std::unique_ptr<Impl> implementation);
+
+  std::unique_ptr<Impl> implementation_;
+
+  friend class Database;
+};
+
 class Database final {
 public:
   [[nodiscard]] static Database open(const ConnectionLocator& locator,
@@ -295,6 +313,7 @@ public:
 
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] const ServerVersion& server_version() const;
+  [[nodiscard]] LifecycleLock acquire_lifecycle_lock() &;
   [[nodiscard]] SchemaSnapshot introspect(const std::vector<std::string>& managed_schemas) const;
 
   void execute_source(std::string_view sql);

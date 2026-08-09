@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1233,6 +1234,8 @@ void configure_connection(pqxx::transaction_base& transaction, const ConnectionS
 
 constexpr std::string_view advisory_lock_sql =
     "SELECT pg_catalog.pg_advisory_lock(168430090, 1145194822)";
+constexpr std::string_view advisory_try_lock_sql =
+    "SELECT pg_catalog.pg_try_advisory_lock(168430090, 1145194822)";
 constexpr std::string_view advisory_unlock_sql =
     "SELECT pg_catalog.pg_advisory_unlock(168430090, 1145194822)";
 
@@ -4101,12 +4104,43 @@ void execute_unit_prefix(pqxx::nontransaction& transaction, const ParsedScript& 
 
 } // namespace
 
-struct Database::Impl {
-  std::unique_ptr<pqxx::connection> connection;
-  ServerVersion version;
+struct LifecycleLock::Impl {
+  explicit Impl(std::shared_ptr<pqxx::connection> database_connection)
+      : connection{std::move(database_connection)} {}
 
-  Impl(std::unique_ptr<pqxx::connection> database_connection, const ServerVersion server_version)
-      : connection{std::move(database_connection)}, version{server_version} {}
+  ~Impl() {
+    if (!connection || !connection->is_open()) {
+      return;
+    }
+    try {
+      pqxx::nontransaction transaction{*connection};
+      const auto row = execute_one_row(transaction, advisory_unlock_sql);
+      static_cast<void>(row);
+    } catch (const std::exception&) {
+    }
+  }
+
+  std::shared_ptr<pqxx::connection> connection;
+};
+
+LifecycleLock::LifecycleLock(std::unique_ptr<Impl> implementation)
+    : implementation_{std::move(implementation)} {}
+
+LifecycleLock::LifecycleLock(LifecycleLock&&) noexcept = default;
+
+LifecycleLock& LifecycleLock::operator=(LifecycleLock&&) noexcept = default;
+
+LifecycleLock::~LifecycleLock() = default;
+
+struct Database::Impl {
+  std::shared_ptr<pqxx::connection> connection;
+  ServerVersion version;
+  ConnectionSettings settings;
+
+  Impl(std::shared_ptr<pqxx::connection> database_connection, const ServerVersion server_version,
+       const ConnectionSettings connection_settings)
+      : connection{std::move(database_connection)}, version{server_version},
+        settings{connection_settings} {}
 };
 
 Database::Database(std::unique_ptr<Impl> implementation)
@@ -4121,11 +4155,11 @@ Database& Database::operator=(Database&&) noexcept = default;
 Database Database::open(const ConnectionLocator& locator, const ConnectionSettings settings) {
   try {
     const auto connection_string = locator.connection_string();
-    auto connection = std::make_unique<pqxx::connection>(connection_string.c_str());
+    auto connection = std::make_shared<pqxx::connection>(connection_string.c_str());
     pqxx::nontransaction transaction{*connection};
     configure_connection(transaction, settings);
     const auto version = connection_server_version(transaction);
-    return Database{std::make_unique<Impl>(std::move(connection), version)};
+    return Database{std::make_unique<Impl>(std::move(connection), version, settings)};
   } catch (const Error&) {
     throw;
   } catch (const std::exception&) {
@@ -4146,6 +4180,34 @@ const ServerVersion& Database::server_version() const {
     throw std::logic_error{"PostgreSQL database session is not open"};
   }
   return implementation_->version;
+}
+
+LifecycleLock Database::acquire_lifecycle_lock() & {
+  if (!is_open()) {
+    throw Error{ErrorCode::database, "PostgreSQL database session is not open"};
+  }
+  try {
+    pqxx::nontransaction transaction{*implementation_->connection};
+    const auto deadline = std::chrono::steady_clock::now() + implementation_->settings.lock_timeout;
+    constexpr auto poll_interval = std::chrono::milliseconds{10};
+    while (true) {
+      const auto row = execute_one_row(transaction, advisory_try_lock_sql);
+      if (!row[0].is_null() && row[0].as<bool>()) {
+        return LifecycleLock{std::make_unique<LifecycleLock::Impl>(implementation_->connection)};
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        throw Error{ErrorCode::database, "PostgreSQL lifecycle lock acquisition timed out"};
+      }
+      const auto poll =
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(poll_interval);
+      std::this_thread::sleep_for(std::min(deadline - now, poll));
+    }
+  } catch (const Error&) {
+    throw;
+  } catch (const std::exception&) {
+    throw Error{ErrorCode::database, "PostgreSQL lifecycle lock acquisition failed"};
+  }
 }
 
 SchemaSnapshot Database::introspect(const std::vector<std::string>& managed_schemas) const {
