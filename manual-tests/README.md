@@ -101,14 +101,22 @@ shellcheck manual-tests/run.sh manual-tests/lib/*.sh manual-tests/scenarios/*.sh
 bash tests/scripts/validate_requirements.sh
 ```
 
-The requirements matrix is [`tests/requirements.tsv`](../tests/requirements.tsv). Its validator
-checks unique requirement IDs, planned Catch2 tag names, and exact links to every manual scenario.
-It also reports which planned unit and integration tags actually exist; planned tags are not treated
-as implemented coverage. Use the strict form as a release gate once every planned target has real
-test evidence; it intentionally fails while gaps remain:
+The requirements matrix is [`tests/requirements.tsv`](../tests/requirements.tsv), and
+[`tests/evidence.tsv`](../tests/evidence.tsv) maps supported requirements to exact CTest or manual
+scenario names. Each supported row declares whether unit evidence, integration evidence, or both
+are required; planned requirements must declare no required evidence and have no evidence rows.
+The structural check is useful before a build; it deliberately does not claim that automated
+evidence is registered:
 
 ```sh
-bash tests/scripts/validate_requirements.sh --strict
+bash tests/scripts/validate_requirements.sh
+```
+
+After building, the strict release gate verifies every automated evidence name against CTest's
+actual unit and integration registrations. It gates supported scope only:
+
+```sh
+bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
 ```
 
 ## Suggested CI execution
@@ -119,7 +127,7 @@ cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build/debug --parallel
 ctest --test-dir build/debug --output-on-failure -L unit
 ctest --test-dir build/debug --output-on-failure -L integration.sqlite
-bash tests/scripts/validate_requirements.sh
+bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
 DBDIFF_BIN="$PWD/build/debug/dbdiff" bash manual-tests/run.sh --group ci-safe
 
 export DBDIFF_MANUAL_ALLOW_DOCKER=I_UNDERSTAND

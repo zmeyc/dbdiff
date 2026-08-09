@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CTEST_OUTPUT_ON_FAILURE: "1"
+
+jobs:
+  build-test-format:
+    name: Build, unit, SQLite, format, traceability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential catch2 clang-format cmake libcli11-dev libpq-dev \
+            libpqxx-dev libsqlite3-dev libssl-dev libyaml-cpp-dev ninja-build \
+            pkg-config sqlite3
+      - name: Configure and build
+        run: |
+          cmake --preset debug -DDBDIFF_BUILD_INTEGRATION_TESTS=ON
+          cmake --build --preset debug
+      - name: Validate supported-scope evidence
+        run: bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
+      - name: Run unit tests
+        run: ctest --test-dir build/debug --no-tests=error --output-on-failure -L '^unit$'
+      - name: Run SQLite CLI integration without skips
+        shell: bash
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/sqlite-integration.log"
+          ctest --test-dir build/debug --no-tests=error -V -L '^integration\.sqlite$' | tee "${log}"
+          if grep -Eiq '(^|[^[:alpha:]])skip(ped)?([^[:alpha:]]|$)' "${log}"; then
+            echo 'SQLite integration reported a skip' >&2
+            exit 1
+          fi
+      - name: Check formatting
+        run: cmake --build --preset debug --target format-check
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential catch2 clang-tidy cmake libcli11-dev libpq-dev \
+            libpqxx-dev libsqlite3-dev libssl-dev libyaml-cpp-dev ninja-build \
+            pkg-config
+      - name: Build with clang-tidy
+        run: |
+          cmake -S . -B build/tidy -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON \
+            -DDBDIFF_BUILD_INTEGRATION_TESTS=ON \
+            -DDBDIFF_ENABLE_CLANG_TIDY=ON
+          cmake --build build/tidy
+
+  sanitizers:
+    name: ASan and UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential catch2 cmake libcli11-dev libpq-dev libpqxx-dev \
+            libsqlite3-dev libssl-dev libyaml-cpp-dev ninja-build pkg-config sqlite3
+      - name: Configure and build with sanitizers
+        run: |
+          cmake --preset asan-ubsan -DDBDIFF_BUILD_INTEGRATION_TESTS=ON
+          cmake --build --preset asan-ubsan
+      - name: Run sanitized unit tests
+        run: ctest --test-dir build/asan-ubsan --no-tests=error --output-on-failure -L '^unit$'
+      - name: Run sanitized SQLite integration
+        run: >-
+          ctest --test-dir build/asan-ubsan --no-tests=error --output-on-failure
+          -L '^integration\.sqlite$'
+
+  postgresql-lifecycle:
+    name: PostgreSQL ${{ matrix.postgresql }} lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        postgresql: [15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential catch2 cmake libcli11-dev libpq-dev libpqxx-dev \
+            libsqlite3-dev libssl-dev libyaml-cpp-dev ninja-build pkg-config
+      - name: Configure and build integration tests
+        run: |
+          cmake --preset debug -DDBDIFF_BUILD_INTEGRATION_TESTS=ON
+          cmake --build --preset debug
+      - name: Require Docker and pull the selected PostgreSQL image
+        run: |
+          docker info
+          docker pull "postgres:${{ matrix.postgresql }}"
+      - name: Run PostgreSQL lifecycle and Docker ownership tests without skips
+        shell: bash
+        env:
+          DBDIFF_TEST_POSTGRES_MAJOR: ${{ matrix.postgresql }}
+          DBDIFF_TEST_POSTGRES_IMAGE: postgres:${{ matrix.postgresql }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/postgresql-${DBDIFF_TEST_POSTGRES_MAJOR}.log"
+          ctest --test-dir build/debug --no-tests=error -V \
+            -L '^integration\.(docker|postgresql)$' | tee "${log}"
+          if grep -Eiq '(^|[^[:alpha:]])skip(ped)?([^[:alpha:]]|$)' "${log}"; then
+            echo 'PostgreSQL integration reported a skip' >&2
+            exit 1
+          fi

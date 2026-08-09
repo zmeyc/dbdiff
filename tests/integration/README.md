@@ -43,7 +43,28 @@ for major in 15 16 17 18; do
 done
 ```
 
+CI first requires `docker info` and pulls the selected image, then runs the CTest labels
+`integration.docker` and `integration.postgresql`. It treats any Catch2 `SKIP`/`skipped` result as
+a job failure. This is intentional: local developer runs may skip when Docker is unavailable, but
+the PostgreSQL 15-18 compatibility matrix is evidence only when every lifecycle case executes.
+
 `DBDIFF_TEST_POSTGRES_IMAGE` selects a custom image while
 `DBDIFF_TEST_POSTGRES_MAJOR` continues to declare the expected major. If Docker CLI or its daemon
 is unavailable, the runner prints `SKIP` and exits successfully. A missing test binary is an error,
 not a skip.
+
+## Requirements evidence
+
+[`../requirements.tsv`](../requirements.tsv) separates shipped requirements from planned work;
+[`../evidence.tsv`](../evidence.tsv) maps shipped requirements to exact discovered CTest names and
+manual scenario names. Validate structure before configuring, then verify registrations after the
+test executables have been built:
+
+```sh
+bash tests/scripts/validate_requirements.sh
+bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
+```
+
+The strict check enforces each supported row's declared unit/integration evidence contract, rejects
+evidence attached to planned requirements, and rejects any automated name that is absent from the
+requested build's CTest registry.

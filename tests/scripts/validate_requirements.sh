@@ -5,23 +5,27 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 MATRIX="${REPO_ROOT}/tests/requirements.tsv"
+EVIDENCE="${REPO_ROOT}/tests/evidence.tsv"
 SCENARIO_DIR="${REPO_ROOT}/manual-tests/scenarios"
 STRICT_EVIDENCE=0
+BUILD_DIR=""
 TEMP_ROOT=""
 
 usage() {
   cat <<'EOF'
-Usage: tests/scripts/validate_requirements.sh [--strict|--verify-test-ids]
+Usage: tests/scripts/validate_requirements.sh [--strict] [--build-dir DIR]
 
-Without options, validate matrix structure and manual-scenario links, then report
-the Catch2 evidence tags that actually exist. With --strict (or the legacy
---verify-test-ids spelling), fail when any planned [unit][REQ-ID] or
-[integration][REQ-ID] evidence tag is missing.
+Validate the supported-versus-planned requirements matrix and its explicit
+evidence map. Structural validation does not claim that automated evidence is
+registered. --strict requires --build-dir and verifies every unit and
+integration evidence name against the tests actually registered with CTest.
+
+The legacy --verify-test-ids spelling is accepted as an alias for --strict.
 EOF
 }
 
 fail() {
-  printf 'requirements matrix: %s\n' "$*" >&2
+  printf 'requirements traceability: %s\n' "$*" >&2
   exit 1
 }
 
@@ -48,70 +52,160 @@ handle_signal() {
   exit "${status}"
 }
 
-case "${1:-}" in
-  '') ;;
-  --strict|--verify-test-ids) STRICT_EVIDENCE=1 ;;
-  --help|-h) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
-[[ "$#" -le 1 ]] || { usage >&2; exit 2; }
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --strict|--verify-test-ids)
+      STRICT_EVIDENCE=1
+      shift
+      ;;
+    --build-dir)
+      [[ "$#" -ge 2 ]] || { usage >&2; exit 2; }
+      BUILD_DIR="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${STRICT_EVIDENCE}" == "1" && -z "${BUILD_DIR}" ]]; then
+  fail "--strict requires --build-dir so evidence is checked against registered tests"
+fi
 
 [[ -f "${MATRIX}" && ! -L "${MATRIX}" ]] || fail "missing regular file ${MATRIX}"
+[[ -f "${EVIDENCE}" && ! -L "${EVIDENCE}" ]] || fail "missing regular file ${EVIDENCE}"
 [[ -d "${SCENARIO_DIR}" && ! -L "${SCENARIO_DIR}" ]] || fail "missing scenario directory"
-command -v awk >/dev/null 2>&1 || fail "awk is required"
-command -v mktemp >/dev/null 2>&1 || fail "mktemp is required"
+for command in awk ctest grep mktemp sed sort; do
+  command -v "${command}" >/dev/null 2>&1 || fail "${command} is required"
+done
+
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dbdiff-requirements.XXXXXX")"
 TEMP_ROOT="$(CDPATH= cd -- "${TEMP_ROOT}" && pwd -P)"
 trap safe_cleanup EXIT
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
-if ! awk -F '\t' 'NF != 6 { print NR ":" NF; bad=1 } END { exit bad }' "${MATRIX}" \
-  >"${TEMP_ROOT}/bad-fields"; then
-  cat "${TEMP_ROOT}/bad-fields" >&2
-  fail "every row must contain exactly six tab-separated fields"
+if ! awk -F '\t' 'NF != 5 { print NR ":" NF; bad=1 } END { exit bad }' "${MATRIX}" \
+  >"${TEMP_ROOT}/bad-matrix-fields"; then
+  cat "${TEMP_ROOT}/bad-matrix-fields" >&2
+  fail "every requirements row must contain exactly five tab-separated fields"
+fi
+if ! awk -F '\t' 'NF != 3 { print NR ":" NF; bad=1 } END { exit bad }' "${EVIDENCE}" \
+  >"${TEMP_ROOT}/bad-evidence-fields"; then
+  cat "${TEMP_ROOT}/bad-evidence-fields" >&2
+  fail "every evidence row must contain exactly three tab-separated fields"
 fi
 
-expected_header=$'id\tarea\trequirement\tunit_target\tintegration_target\tmanual_scenario'
-IFS= read -r actual_header <"${MATRIX}"
-[[ "${actual_header}" == "${expected_header}" ]] || fail "unexpected header"
+expected_matrix_header=$'id\tarea\tstatus\trequired_evidence\trequirement'
+IFS= read -r actual_matrix_header <"${MATRIX}"
+[[ "${actual_matrix_header}" == "${expected_matrix_header}" ]] ||
+  fail "unexpected requirements.tsv header"
+expected_evidence_header=$'requirement_id\tkind\tname'
+IFS= read -r actual_evidence_header <"${EVIDENCE}"
+[[ "${actual_evidence_header}" == "${expected_evidence_header}" ]] ||
+  fail "unexpected evidence.tsv header"
 
-declare -a requirement_ids=()
 : >"${TEMP_ROOT}/ids"
-: >"${TEMP_ROOT}/referenced-scenarios"
+: >"${TEMP_ROOT}/supported"
+: >"${TEMP_ROOT}/supported-contracts"
+: >"${TEMP_ROOT}/planned"
 line_number=1
-while IFS=$'\t' read -r id area requirement unit_target integration_target manual_scenario; do
+while IFS=$'\t' read -r id area status required_evidence requirement; do
   line_number=$((line_number + 1))
-  [[ -n "${id}${area}${requirement}${unit_target}${integration_target}${manual_scenario}" ]] ||
-    continue
-  [[ "${id}" =~ ^[A-Z][A-Z0-9]*-[0-9]{3}$ ]] || fail "invalid ID at line ${line_number}: ${id}"
-  if grep -Fxq -- "${id}" "${TEMP_ROOT}/ids"; then
-    fail "duplicate ID at line ${line_number}: ${id}"
-  fi
+  [[ -n "${id}${area}${status}${required_evidence}${requirement}" ]] || continue
+  [[ "${id}" =~ ^[A-Z][A-Z0-9]*-[0-9]{3}$ ]] ||
+    fail "invalid requirement ID at line ${line_number}: ${id}"
+  grep -Fxq -- "${id}" "${TEMP_ROOT}/ids" &&
+    fail "duplicate requirement ID at line ${line_number}: ${id}"
+  [[ -n "${area}" && -n "${requirement}" ]] ||
+    fail "empty requirement field at line ${line_number}: ${id}"
+  case "${status}" in
+    supported)
+      case "${required_evidence}" in
+        unit|integration|unit+integration) ;;
+        *) fail "invalid supported evidence contract for ${id}: ${required_evidence}" ;;
+      esac
+      printf '%s\t%s\n' "${id}" "${required_evidence}" \
+        >>"${TEMP_ROOT}/supported-contracts"
+      ;;
+    planned)
+      [[ "${required_evidence}" == "-" ]] ||
+        fail "planned requirement ${id} must declare required_evidence as -"
+      ;;
+    *) fail "invalid status at line ${line_number}: ${status}" ;;
+  esac
   printf '%s\n' "${id}" >>"${TEMP_ROOT}/ids"
-  requirement_ids+=("${id}")
-  [[ -n "${area}" && -n "${requirement}" ]] || fail "empty description at line ${line_number}"
-  [[ "${unit_target}" == "unit:${id}" ]] || fail "invalid planned unit tag for ${id}"
-  [[ "${integration_target}" == "integration:${id}" ]] ||
-    fail "invalid planned integration tag for ${id}"
-  if [[ "${manual_scenario}" != "-" ]]; then
-    [[ "${manual_scenario}" =~ ^[0-9]{3}_[a-z0-9_]+$ ]] ||
-      fail "invalid manual scenario for ${id}: ${manual_scenario}"
-    [[ -f "${SCENARIO_DIR}/${manual_scenario}.sh" &&
-       ! -L "${SCENARIO_DIR}/${manual_scenario}.sh" ]] ||
-      fail "missing manual scenario for ${id}: ${manual_scenario}"
-    if ! grep -Fxq -- "${manual_scenario}" "${TEMP_ROOT}/referenced-scenarios"; then
-      printf '%s\n' "${manual_scenario}" >>"${TEMP_ROOT}/referenced-scenarios"
-    fi
-  fi
+  printf '%s\n' "${id}" >>"${TEMP_ROOT}/${status}"
 done < <(tail -n +2 "${MATRIX}")
+[[ -s "${TEMP_ROOT}/ids" ]] || fail "requirements matrix contains no rows"
 
-[[ "${#requirement_ids[@]}" -gt 0 ]] || fail "matrix contains no requirements"
+: >"${TEMP_ROOT}/unit-evidence"
+: >"${TEMP_ROOT}/integration-evidence"
+: >"${TEMP_ROOT}/manual-evidence"
+: >"${TEMP_ROOT}/evidence-rows"
+line_number=1
+while IFS=$'\t' read -r id kind name; do
+  line_number=$((line_number + 1))
+  [[ -n "${id}${kind}${name}" ]] || continue
+  grep -Fxq -- "${id}" "${TEMP_ROOT}/ids" ||
+    fail "evidence at line ${line_number} references unknown requirement ${id}"
+  grep -Fxq -- "${id}" "${TEMP_ROOT}/planned" &&
+    fail "planned requirement ${id} must not claim evidence"
+  case "${kind}" in
+    unit|integration|manual) ;;
+    *) fail "invalid evidence kind at line ${line_number}: ${kind}" ;;
+  esac
+  [[ -n "${name}" ]] || fail "empty evidence name at line ${line_number}"
+  row="${id}"$'\t'"${kind}"$'\t'"${name}"
+  grep -Fxq -- "${row}" "${TEMP_ROOT}/evidence-rows" &&
+    fail "duplicate evidence row at line ${line_number}: ${id} ${kind} ${name}"
+  printf '%s\n' "${row}" >>"${TEMP_ROOT}/evidence-rows"
+  printf '%s\t%s\n' "${id}" "${name}" >>"${TEMP_ROOT}/${kind}-evidence"
+done < <(tail -n +2 "${EVIDENCE}")
+
+while IFS=$'\t' read -r id required_evidence; do
+  grep -Eq "^${id}"$'\t' "${TEMP_ROOT}/evidence-rows" ||
+    fail "supported requirement ${id} has no evidence"
+  case "${required_evidence}" in
+    unit)
+      grep -Eq "^${id}"$'\t' "${TEMP_ROOT}/unit-evidence" ||
+        fail "supported requirement ${id} requires unit evidence"
+      ;;
+    integration)
+      grep -Eq "^${id}"$'\t' "${TEMP_ROOT}/integration-evidence" ||
+        fail "supported requirement ${id} requires integration evidence"
+      ;;
+    unit+integration)
+      grep -Eq "^${id}"$'\t' "${TEMP_ROOT}/unit-evidence" ||
+        fail "supported requirement ${id} requires unit evidence"
+      grep -Eq "^${id}"$'\t' "${TEMP_ROOT}/integration-evidence" ||
+        fail "supported requirement ${id} requires integration evidence"
+      ;;
+  esac
+done <"${TEMP_ROOT}/supported-contracts"
+
+: >"${TEMP_ROOT}/referenced-scenarios"
+while IFS=$'\t' read -r id scenario; do
+  [[ -n "${id}${scenario}" ]] || continue
+  [[ "${scenario}" =~ ^[0-9]{3}_[a-z0-9_]+$ ]] ||
+    fail "invalid manual scenario name for ${id}: ${scenario}"
+  scenario_file="${SCENARIO_DIR}/${scenario}.sh"
+  [[ -f "${scenario_file}" && ! -L "${scenario_file}" ]] ||
+    fail "manual evidence for ${id} is not a regular scenario: ${scenario}"
+  printf '%s\n' "${scenario}" >>"${TEMP_ROOT}/referenced-scenarios"
+done <"${TEMP_ROOT}/manual-evidence"
+sort -u "${TEMP_ROOT}/referenced-scenarios" >"${TEMP_ROOT}/unique-scenarios"
 
 while IFS= read -r scenario_file; do
   scenario="$(basename -- "${scenario_file}" .sh)"
-  grep -Fxq -- "${scenario}" "${TEMP_ROOT}/referenced-scenarios" ||
-    fail "manual scenario is not linked from the matrix: ${scenario}"
+  grep -Fxq -- "${scenario}" "${TEMP_ROOT}/unique-scenarios" ||
+    fail "manual scenario is not present in evidence.tsv: ${scenario}"
   grep -Fq -- 'set -Eeuo pipefail' "${scenario_file}" ||
     fail "manual scenario does not enable strict shell behavior: ${scenario}"
   grep -Fq -- 'manual_init ' "${scenario_file}" ||
@@ -132,63 +226,48 @@ grep -Fq -- 'mktemp -d' "${REPO_ROOT}/manual-tests/lib/common.sh" ||
 grep -Fq -- 'io.dbdiff.manual.run' "${REPO_ROOT}/manual-tests/lib/common.sh" ||
   fail "manual Docker cleanup must verify a run ownership label"
 
-while IFS= read -r test_source; do
-  printf '%s\n' "${test_source}" >>"${TEMP_ROOT}/test-sources"
-done < <(find "${REPO_ROOT}/tests" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
-  -print | sort)
-[[ -s "${TEMP_ROOT}/test-sources" ]] || fail "no C++ test sources found"
-
-: >"${TEMP_ROOT}/unit-evidence"
-: >"${TEMP_ROOT}/integration-evidence"
-: >"${TEMP_ROOT}/missing-unit"
-: >"${TEMP_ROOT}/missing-integration"
-for id in "${requirement_ids[@]}"; do
-  unit_found=0
-  integration_found=0
-  while IFS= read -r test_source; do
-    if grep -Eq "\\[unit\\].*\\[${id}\\]|\\[${id}\\].*\\[unit\\]" "${test_source}"; then
-      unit_found=1
-    fi
-    if grep -Eq "\\[integration\\].*\\[${id}\\]|\\[${id}\\].*\\[integration\\]" \
-      "${test_source}"; then
-      integration_found=1
-    fi
-  done <"${TEMP_ROOT}/test-sources"
-  if [[ "${unit_found}" == "1" ]]; then
-    printf '%s\n' "${id}" >>"${TEMP_ROOT}/unit-evidence"
-  else
-    printf '%s\n' "${id}" >>"${TEMP_ROOT}/missing-unit"
+if [[ -n "${BUILD_DIR}" ]]; then
+  if [[ "${BUILD_DIR}" != /* ]]; then
+    BUILD_DIR="${PWD}/${BUILD_DIR}"
   fi
-  if [[ "${integration_found}" == "1" ]]; then
-    printf '%s\n' "${id}" >>"${TEMP_ROOT}/integration-evidence"
-  else
-    printf '%s\n' "${id}" >>"${TEMP_ROOT}/missing-integration"
-  fi
-done
+  [[ -d "${BUILD_DIR}" ]] || fail "CTest build directory does not exist: ${BUILD_DIR}"
+  BUILD_DIR="$(CDPATH= cd -- "${BUILD_DIR}" && pwd -P)"
+  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" ]] ||
+    fail "build directory has no CTest registration: ${BUILD_DIR}"
 
-manual_count="$(sed '/^$/d' "${TEMP_ROOT}/referenced-scenarios" | wc -l | tr -d '[:space:]')"
-unit_count="$(wc -l <"${TEMP_ROOT}/unit-evidence" | tr -d '[:space:]')"
-integration_count="$(wc -l <"${TEMP_ROOT}/integration-evidence" | tr -d '[:space:]')"
-missing_unit_count="$(wc -l <"${TEMP_ROOT}/missing-unit" | tr -d '[:space:]')"
-missing_integration_count="$(wc -l <"${TEMP_ROOT}/missing-integration" | tr -d '[:space:]')"
+  ctest --test-dir "${BUILD_DIR}" -N -L '^unit$' >"${TEMP_ROOT}/ctest-unit-output"
+  ctest --test-dir "${BUILD_DIR}" -N -L '^integration' \
+    >"${TEMP_ROOT}/ctest-integration-output"
+  sed -n 's/^[[:space:]]*Test[[:space:]]*#[0-9][0-9]*: //p' \
+    "${TEMP_ROOT}/ctest-unit-output" >"${TEMP_ROOT}/registered-unit"
+  sed -n 's/^[[:space:]]*Test[[:space:]]*#[0-9][0-9]*: //p' \
+    "${TEMP_ROOT}/ctest-integration-output" >"${TEMP_ROOT}/registered-integration"
+  [[ -s "${TEMP_ROOT}/registered-unit" ]] || fail "CTest registered no unit tests"
+  [[ -s "${TEMP_ROOT}/registered-integration" ]] || fail "CTest registered no integration tests"
 
-printf 'Matrix structure valid: %d requirements and %d linked manual scenarios.\n' \
-  "${#requirement_ids[@]}" "${manual_count}"
-printf 'Catch2 evidence tags found: %d unit and %d integration (of %d planned targets each).\n' \
-  "${unit_count}" "${integration_count}" "${#requirement_ids[@]}"
-
-if [[ "${missing_unit_count}" -gt 0 || "${missing_integration_count}" -gt 0 ]]; then
-  printf 'Evidence gaps remain: %d unit and %d integration tags are missing.\n' \
-    "${missing_unit_count}" "${missing_integration_count}"
+  while IFS=$'\t' read -r id name; do
+    [[ -n "${id}${name}" ]] || continue
+    grep -Fxq -- "${name}" "${TEMP_ROOT}/registered-unit" ||
+      fail "unit evidence for ${id} is not a registered CTest name: ${name}"
+  done <"${TEMP_ROOT}/unit-evidence"
+  while IFS=$'\t' read -r id name; do
+    [[ -n "${id}${name}" ]] || continue
+    grep -Fxq -- "${name}" "${TEMP_ROOT}/registered-integration" ||
+      fail "integration evidence for ${id} is not a registered CTest name: ${name}"
+  done <"${TEMP_ROOT}/integration-evidence"
 fi
 
-if [[ "${STRICT_EVIDENCE}" == "1" ]] &&
-  [[ "${missing_unit_count}" -gt 0 || "${missing_integration_count}" -gt 0 ]]; then
-  while IFS= read -r id; do
-    printf 'missing Catch2 [unit][%s] evidence tag\n' "${id}" >&2
-  done <"${TEMP_ROOT}/missing-unit"
-  while IFS= read -r id; do
-    printf 'missing Catch2 [integration][%s] evidence tag\n' "${id}" >&2
-  done <"${TEMP_ROOT}/missing-integration"
-  fail "strict evidence check found missing tags"
+supported_count="$(wc -l <"${TEMP_ROOT}/supported" | tr -d '[:space:]')"
+planned_count="$(wc -l <"${TEMP_ROOT}/planned" | tr -d '[:space:]')"
+unit_count="$(wc -l <"${TEMP_ROOT}/unit-evidence" | tr -d '[:space:]')"
+integration_count="$(wc -l <"${TEMP_ROOT}/integration-evidence" | tr -d '[:space:]')"
+manual_count="$(wc -l <"${TEMP_ROOT}/unique-scenarios" | tr -d '[:space:]')"
+printf 'Traceability structure valid: %s supported and %s planned requirements.\n' \
+  "${supported_count}" "${planned_count}"
+printf 'Evidence mappings: %s unit, %s integration, and %s manual scenarios.\n' \
+  "${unit_count}" "${integration_count}" "${manual_count}"
+if [[ -n "${BUILD_DIR}" ]]; then
+  printf 'Automated evidence names match registered CTest tests in %s.\n' "${BUILD_DIR}"
+else
+  printf 'Automated evidence registration not checked; use --strict --build-dir DIR.\n'
 fi
