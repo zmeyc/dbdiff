@@ -1838,7 +1838,7 @@ introspect_connection(pqxx::connection& connection,
   const auto index_component_rows = transaction.exec(
       "SELECT ni.nspname, ci.relname, key.ordinality, i.indnkeyatts, "
       "       pg_catalog.pg_get_indexdef(i.indexrelid, key.ordinality::integer, false), "
-      "       a.attname "
+      "       a.attname, ordering.option_value "
       "FROM pg_catalog.pg_index AS i "
       "JOIN pg_catalog.pg_class AS ci ON ci.oid = i.indexrelid "
       "JOIN pg_catalog.pg_namespace AS ni ON ni.oid = ci.relnamespace "
@@ -1846,6 +1846,9 @@ introspect_connection(pqxx::connection& connection,
       "JOIN pg_catalog.pg_namespace AS nt ON nt.oid = ct.relnamespace "
       "CROSS JOIN LATERAL pg_catalog.unnest(i.indkey) WITH ORDINALITY "
       "  AS key(attnum, ordinality) "
+      "LEFT JOIN LATERAL pg_catalog.unnest(i.indoption) WITH ORDINALITY "
+      "  AS ordering(option_value, ordinality) "
+      "  ON ordering.ordinality = key.ordinality "
       "LEFT JOIN pg_catalog.pg_attribute AS a "
       "  ON a.attrelid = i.indrelid AND a.attnum = key.attnum "
       "WHERE nt.nspname IN (" +
@@ -1865,7 +1868,22 @@ introspect_connection(pqxx::connection& connection,
       if (ordinal != index.key_expressions.size() + 1U || row[4].is_null()) {
         throw Error{ErrorCode::database, "PostgreSQL index keys are not contiguous"};
       }
-      index.key_expressions.push_back(row[4].as<std::string>());
+      if (row[6].is_null()) {
+        throw Error{ErrorCode::database, "PostgreSQL index ordering metadata is missing"};
+      }
+      auto expression = row[4].as<std::string>();
+      const auto options = row[6].as<int>();
+      constexpr int descending = 1;
+      constexpr int nulls_first = 2;
+      if ((options & descending) != 0) {
+        expression.append(" DESC");
+      }
+      if ((options & nulls_first) != 0 && (options & descending) == 0) {
+        expression.append(" NULLS FIRST");
+      } else if ((options & nulls_first) == 0 && (options & descending) != 0) {
+        expression.append(" NULLS LAST");
+      }
+      index.key_expressions.push_back(std::move(expression));
     } else {
       if (ordinal != key_count + index.included_columns.size() + 1U || row[5].is_null()) {
         throw Error{ErrorCode::database, "PostgreSQL included index columns are invalid"};

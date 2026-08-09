@@ -48,8 +48,8 @@ SQT-012	sqlite	supported	unit	Primary unique check and foreign-key constraint pr
 SQT-013	sqlite	supported	unit	AUTOINCREMENT sequence state and accessible rowids are preserved across rebuilds
 SQT-014	sqlite	supported	unit	Expression partial ordered collated and unique index definitions round-trip
 SQT-015	sqlite	supported	unit	View definitions and multi-statement trigger bodies round-trip
-PG-001	postgresql	supported	unit	Relational snapshots give stable semantic identities to modeled schemas tables columns constraints indexes and policies
-PG-002	postgresql	supported	unit	Modeled relational objects create change and drop with deterministic dependency-ordered SQL plans
+PG-001	postgresql	supported	unit+integration	Relational snapshots give stable semantic identities to modeled schemas tables columns constraints indexes and policies
+PG-002	postgresql	supported	unit+integration	Modeled relational objects create change and drop with deterministic dependency-ordered SQL plans
 PG-003	postgresql	planned	-	Online phases and transaction-forbidden statements retain explicit valid migration boundaries
 PG-004	postgresql	supported	unit	Ambiguous snapshots data-bearing sources and server-wide migration effects fail closed
 PG-005	postgresql	supported	unit+integration	PostgreSQL majors 15 through 18 are accepted and other majors are rejected
@@ -57,14 +57,14 @@ PG-006	postgresql	planned	-	Scratch database locale encoding collation ctype and
 PG-010	postgresql	supported	unit+integration	Managed schemas tables and columns normalize without catalog OIDs and plan in dependency order
 PG-011	postgresql	planned	-	Enum labels and complete domain definitions round-trip
 PG-012	postgresql	planned	-	Standalone sequence properties and ownership relationships round-trip
-PG-013	postgresql	supported	unit	Modeled ordinary table column default nullability and identity-mode properties plan and normalize
-PG-014	postgresql	supported	unit	Primary unique check and foreign-key constraints have stable identities and dependency-aware plans
-PG-015	postgresql	supported	unit	Expression partial INCLUDE uniqueness null-distinctness and method index properties have stable identities and plans
+PG-013	postgresql	supported	unit+integration	Modeled ordinary table column default nullability and identity-mode properties plan and normalize
+PG-014	postgresql	supported	unit+integration	Primary unique check and foreign-key constraints have stable identities and dependency-aware plans
+PG-015	postgresql	supported	unit+integration	Expression partial INCLUDE uniqueness null-distinctness and method index properties have stable identities and plans
 PG-016	postgresql	planned	-	View definitions and all managed security options round-trip
 PG-017	postgresql	planned	-	Materialized-view definitions and population state round-trip
 PG-018	postgresql	planned	-	Functions and procedures preserve identity language body and managed attributes
 PG-019	postgresql	planned	-	Trigger definitions and managed comments round-trip
-PG-020	postgresql	supported	unit	Row-security flags and policy command roles expressions and permissiveness have stable identities and plans
+PG-020	postgresql	supported	unit+integration	Row-security flags and policy command roles expressions and permissiveness have stable identities and plans
 PG-021	postgresql	planned	-	Identity sequence options names and constraint backing-index identities round-trip without silent normalization
 PG-022	postgresql	planned	-	Generated-column expressions and supported collations round-trip through live catalog introspection
 SCR-001	scratch	supported	unit+integration	PostgreSQL scratch databases use safe random names ownership markers and verified cleanup
