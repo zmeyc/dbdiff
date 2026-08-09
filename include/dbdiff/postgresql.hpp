@@ -6,6 +6,7 @@
 #include "dbdiff/source.hpp"
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -158,6 +159,58 @@ struct MigrationPlan {
 [[nodiscard]] MigrationPlan plan(SchemaSnapshot from, SchemaSnapshot to);
 [[nodiscard]] std::string render_plan(const MigrationPlan& migration_plan);
 
+enum class MigrationUnitState { started, completed };
+
+struct MigrationUnitRecord {
+  std::size_t ordinal{0};
+  std::string exact_sha256;
+  bool explicit_transaction{false};
+  std::string before_schema_sha256;
+  std::string after_schema_sha256;
+  MigrationUnitState state{MigrationUnitState::started};
+
+  bool operator==(const MigrationUnitRecord&) const = default;
+};
+
+struct MigrationHistoryEntry {
+  std::string version;
+  std::string backend;
+  std::string engine_version;
+  std::string attempted_file_sha256;
+  std::optional<std::string> completed_file_sha256;
+  std::vector<MigrationUnitRecord> units;
+
+  bool operator==(const MigrationHistoryEntry&) const = default;
+};
+
+struct MigrationHistory {
+  bool initialized{false};
+  std::vector<MigrationHistoryEntry> entries;
+
+  bool operator==(const MigrationHistory&) const = default;
+};
+
+struct MigrationRevision {
+  std::size_t ordinal{0};
+  std::string exact_file_sha256;
+  std::string sql;
+
+  bool operator==(const MigrationRevision&) const = default;
+};
+
+struct MigrationApplyResult {
+  bool already_completed{false};
+  std::size_t completed_unit_count{0};
+  std::string completed_file_sha256;
+
+  bool operator==(const MigrationApplyResult&) const = default;
+};
+
+[[nodiscard]] MigrationApplyResult
+validate_migration_resume(const std::optional<MigrationHistoryEntry>& history,
+                          const ParsedScript& candidate, std::string_view exact_file_sha256,
+                          bool resume);
+
 class Database final {
 public:
   [[nodiscard]] static Database open(const ConnectionLocator& locator);
@@ -177,6 +230,12 @@ public:
   void execute_sources(const std::vector<std::string_view>& sources);
   void execute_sources(const SourceSet& sources);
   void execute_migration(std::string_view sql);
+  void execute_prefix(std::string_view sql, std::size_t completed_unit_count);
+  [[nodiscard]] MigrationHistory read_history() const;
+  [[nodiscard]] MigrationApplyResult apply_version(std::string_view version,
+                                                   std::string_view exact_file_sha256,
+                                                   std::string_view sql, bool resume);
+  [[nodiscard]] std::vector<MigrationRevision> recover_revisions(std::string_view version) const;
 
 private:
   struct Impl;
@@ -206,6 +265,7 @@ public:
   void execute_sources(const std::vector<std::string_view>& sources);
   void execute_sources(const SourceSet& sources);
   void execute_migration(std::string_view sql);
+  void execute_prefix(std::string_view sql, std::size_t completed_unit_count);
 
   void close();
 
