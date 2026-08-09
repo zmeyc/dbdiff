@@ -21,7 +21,7 @@ std::string valid_metadata(const std::string& version = "20260731120000_create_u
 
 } // namespace
 
-TEST_CASE("migration metadata has a strict deterministic representation") {
+TEST_CASE("migration metadata has a strict deterministic representation", "[unit][MIG-001]") {
   const auto version = std::string{"20260731120000_create_users"};
   const auto text = valid_metadata(version) + "BEGIN;\nCREATE TABLE users(id INTEGER);\nCOMMIT;\n";
   const auto metadata = dbdiff::parse_migration_metadata(text);
@@ -34,7 +34,7 @@ TEST_CASE("migration metadata has a strict deterministic representation") {
   CHECK(dbdiff::render_migration_metadata(metadata) == valid_metadata(version));
 }
 
-TEST_CASE("migration metadata rejects malformed and incomplete headers") {
+TEST_CASE("migration metadata rejects malformed and incomplete headers", "[unit][MIG-001]") {
   const auto digest = dbdiff::sha256_hex("state");
   CHECK_THROWS_AS(dbdiff::parse_migration_metadata("CREATE TABLE t(id INTEGER);"), dbdiff::Error);
   CHECK_THROWS_AS(dbdiff::parse_migration_metadata("-- dbdiff: format=1\n-- dbdiff: format=1\n"),
@@ -48,7 +48,7 @@ TEST_CASE("migration metadata rejects malformed and incomplete headers") {
   CHECK_THROWS_AS(dbdiff::parse_migration_metadata(header), dbdiff::Error);
 }
 
-TEST_CASE("migration filenames are constrained and return their version") {
+TEST_CASE("migration filenames are constrained and return their version", "[unit][MIG-001]") {
   CHECK(dbdiff::validate_migration_filename("20260731120000_create_users.sql") ==
         "20260731120000_create_users");
   CHECK_THROWS_AS(dbdiff::validate_migration_filename("create_users.sql"), dbdiff::Error);
@@ -57,7 +57,7 @@ TEST_CASE("migration filenames are constrained and return their version") {
                   dbdiff::Error);
 }
 
-TEST_CASE("migrations load in filename order with exact checksums") {
+TEST_CASE("migrations load in filename order with exact checksums", "[unit][MIG-001]") {
   dbdiff::test::TempDirectory directory;
   const auto second = std::string{"20260731120001_second"};
   const auto first = std::string{"20260731120000_first"};
@@ -75,7 +75,7 @@ TEST_CASE("migrations load in filename order with exact checksums") {
       dbdiff::Error);
 }
 
-TEST_CASE("migration save is atomic and never overwrites") {
+TEST_CASE("migration save is atomic and never overwrites", "[unit][MIG-001]") {
   dbdiff::test::TempDirectory directory;
   const auto version = std::string{"20260731120000_create_users"};
   const auto sql = valid_metadata(version) + "BEGIN;\nCOMMIT;\n";
@@ -88,7 +88,7 @@ TEST_CASE("migration save is atomic and never overwrites") {
                   dbdiff::Error);
 }
 
-TEST_CASE("missing migration directory is an empty stream") {
+TEST_CASE("missing migration directory is an empty stream", "[unit][MIG-001]") {
   dbdiff::test::TempDirectory directory;
   CHECK(dbdiff::load_migrations(directory.path() / "missing", dbdiff::BackendKind::sqlite).empty());
 }

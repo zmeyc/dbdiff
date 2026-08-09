@@ -12,7 +12,7 @@
 namespace pg = dbdiff::postgresql;
 
 TEST_CASE("PostgreSQL locator parsing is deterministic and redacts credentials",
-          "[unit][postgresql]") {
+          "[unit][postgresql][CFG-003]") {
   const auto locator = pg::ConnectionLocator::parse(
       "postgresql://alice:p%40ss@localhost:5432/old_db?application_name=dbdiff");
 
@@ -52,7 +52,8 @@ TEST_CASE("PostgreSQL keyword locators preserve quoted option values", "[unit][p
   CHECK(environment_with_database.value("dbname").value_or("") == "scratch");
 }
 
-TEST_CASE("PostgreSQL locator errors never repeat the supplied secret", "[unit][postgresql]") {
+TEST_CASE("PostgreSQL locator errors never repeat the supplied secret",
+          "[unit][postgresql][CFG-003]") {
   try {
     static_cast<void>(
         pg::ConnectionLocator::parse("password='very-secret' not_a_libpq_option=value"));
@@ -67,7 +68,8 @@ TEST_CASE("PostgreSQL locator errors never repeat the supplied secret", "[unit][
   CHECK_THROWS_AS(pg::ConnectionLocator::parse("host=localhost").with_database(""), dbdiff::Error);
 }
 
-TEST_CASE("PostgreSQL server versions 15 through 18 are accepted", "[unit][postgresql]") {
+TEST_CASE("PostgreSQL server versions 15 through 18 are accepted",
+          "[unit][postgresql][PG-005]") {
   CHECK(pg::validate_server_version(150000) == pg::ServerVersion{150000, 15, 0});
   CHECK(pg::parse_server_version("150017") == pg::ServerVersion{150017, 15, 17});
   CHECK(pg::parse_server_version("180004") == pg::ServerVersion{180004, 18, 4});
@@ -90,7 +92,8 @@ TEST_CASE("PostgreSQL SQL quoting handles identifiers, literals, and control byt
   CHECK_THROWS_AS(pg::quote_literal(std::string{"a\0b", 3}), dbdiff::Error);
 }
 
-TEST_CASE("PostgreSQL scratch names and markers are safe value objects", "[unit][postgresql]") {
+TEST_CASE("PostgreSQL scratch names and markers are safe value objects",
+          "[unit][postgresql][SCR-001]") {
   constexpr std::string_view token = "0123456789abcdef0123456789abcdef";
   const auto identity = pg::ScratchIdentity::from_token(token, 123456789);
 
@@ -112,7 +115,8 @@ TEST_CASE("PostgreSQL scratch names and markers are safe value objects", "[unit]
   CHECK_THROWS_AS(pg::ScratchIdentity::from_token(token, -1), dbdiff::Error);
 }
 
-TEST_CASE("PostgreSQL snapshots normalize without retaining catalog OIDs", "[unit][postgresql]") {
+TEST_CASE("PostgreSQL snapshots normalize without retaining catalog OIDs",
+          "[unit][postgresql][PG-010][PG-013]") {
   pg::SchemaSnapshot snapshot{
       .server_version = pg::ServerVersion{150017, 0, 0},
       .schemas = {"utils", "public"},

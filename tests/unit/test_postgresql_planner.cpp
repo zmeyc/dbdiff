@@ -37,7 +37,7 @@ static_assert(std::is_move_constructible_v<pg::Database>);
 static_assert(!std::is_copy_constructible_v<pg::Database>);
 
 TEST_CASE("PostgreSQL scanner preserves dollar quoted bodies and exact boundaries",
-          "[unit][postgresql][scanner]") {
+          "[unit][postgresql][scanner][SQL-001]") {
   const std::string sql = R"sql(-- leading comment with ;
 CREATE FUNCTION public.audit(value text) RETURNS text
 LANGUAGE plpgsql AS $body$
@@ -75,7 +75,7 @@ COMMIT
 }
 
 TEST_CASE("PostgreSQL scanner rejects malformed and non-resumable scripts",
-          "[unit][postgresql][scanner]") {
+          "[unit][postgresql][scanner][SQL-001][SQL-003]") {
   const auto ordinary_backslash = pg::scan_statements(R"sql(SELECT '\'; COMMIT;)sql");
   REQUIRE(ordinary_backslash.size() == 2U);
   CHECK(ordinary_backslash[1].kind == dbdiff::StatementKind::commit);
@@ -139,7 +139,7 @@ TEST_CASE("PostgreSQL semantic hashes are normalized and version-patch independe
 }
 
 TEST_CASE("PostgreSQL planner creates schemas and tables in dependency order",
-          "[unit][postgresql][planner]") {
+          "[unit][postgresql][planner][MIG-005][PG-010][PG-013]") {
   const pg::SchemaSnapshot from{.server_version = pg15, .schemas = {"public"}};
   const pg::SchemaSnapshot to{
       .server_version = pg15,
@@ -177,7 +177,7 @@ TEST_CASE("PostgreSQL planner creates schemas and tables in dependency order",
 }
 
 TEST_CASE("PostgreSQL planner handles supported column changes with hazards",
-          "[unit][postgresql][planner]") {
+          "[unit][postgresql][planner][PG-013]") {
   const auto from = one_table({
       pg::Column{.position = 1, .name = "id", .type = "bigint", .not_null = true},
       pg::Column{.position = 2, .name = "label", .type = "text"},
@@ -216,7 +216,8 @@ TEST_CASE("PostgreSQL planner handles supported column changes with hazards",
   CHECK(pg::render_plan(pg::plan(from, to)) == sql);
 }
 
-TEST_CASE("PostgreSQL planner drops tables before their schemas", "[unit][postgresql][planner]") {
+TEST_CASE("PostgreSQL planner drops tables before their schemas",
+          "[unit][postgresql][planner][PG-010][PG-013]") {
   const pg::SchemaSnapshot from{
       .server_version = pg15,
       .schemas = {"legacy", "public"},
@@ -242,7 +243,7 @@ TEST_CASE("PostgreSQL planner drops tables before their schemas", "[unit][postgr
 }
 
 TEST_CASE("PostgreSQL planner drafts ambiguous and data-dependent changes",
-          "[unit][postgresql][planner]") {
+          "[unit][postgresql][planner][PLN-002][PLN-004]") {
   SECTION("column rename") {
     const auto from = one_table({pg::Column{.position = 1, .name = "old_name", .type = "text"}});
     const auto to = one_table({pg::Column{.position = 1, .name = "new_name", .type = "text"}});

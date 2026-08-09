@@ -62,7 +62,8 @@ namespace {
 
 } // namespace
 
-TEST_CASE("SQLite planner creates and drops complete schema object sets", "[unit][sqlite][plan]") {
+TEST_CASE("SQLite planner creates and drops complete schema object sets",
+          "[unit][sqlite][plan][SQT-001][SQT-015]") {
   const auto empty = snapshot({});
   const auto desired = snapshot(R"sql(
     CREATE TABLE tasks(id INTEGER PRIMARY KEY, title TEXT NOT NULL);
@@ -92,7 +93,8 @@ TEST_CASE("SQLite planner creates and drops complete schema object sets", "[unit
   CHECK(dbdiff::sqlite::validate_plan(desired, empty));
 }
 
-TEST_CASE("SQLite planner appends columns without rebuilding a table", "[unit][sqlite][plan]") {
+TEST_CASE("SQLite planner appends columns without rebuilding a table",
+          "[unit][sqlite][plan][SQT-002][MIG-005]") {
   const auto from = snapshot("CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT);");
   const auto to = snapshot(R"sql(
     CREATE TABLE items(
@@ -118,7 +120,7 @@ TEST_CASE("SQLite planner appends columns without rebuilding a table", "[unit][s
 }
 
 TEST_CASE("SQLite planner rebuilds tables deterministically and preserves rows and sequences",
-          "[unit][sqlite][plan]") {
+          "[unit][sqlite][plan][SQT-003][SQT-013][MIG-005]") {
   dbdiff::test::TempDirectory directory;
   const auto path = directory.path() / "rebuild.sqlite";
   dbdiff::sqlite::Plan migration;
@@ -194,7 +196,7 @@ TEST_CASE("SQLite planner rebuilds tables deterministically and preserves rows a
 }
 
 TEST_CASE("SQLite planner preserves accessible rowids and reports inaccessible ones",
-          "[unit][sqlite][plan]") {
+          "[unit][sqlite][plan][SQT-013]") {
   const auto from = snapshot("CREATE TABLE data(value TEXT, marker INTEGER);");
   const auto to = snapshot(
       "CREATE TABLE data(marker INTEGER, value TEXT, CHECK(marker IS NULL OR marker>=0));");
@@ -215,7 +217,7 @@ TEST_CASE("SQLite planner preserves accessible rowids and reports inaccessible o
 }
 
 TEST_CASE("SQLite planner marks unknown required-column mappings as drafts",
-          "[unit][sqlite][plan]") {
+          "[unit][sqlite][plan][PLN-004]") {
   const auto from = snapshot("CREATE TABLE records(id INTEGER PRIMARY KEY);");
   const auto to = snapshot("CREATE TABLE records(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);");
   const auto migration = dbdiff::sqlite::plan(from, to);
@@ -245,7 +247,8 @@ TEST_CASE("SQLite planner quotes rebuild identifiers", "[unit][sqlite][plan]") {
   CHECK(dbdiff::sqlite::validate_plan(from, to));
 }
 
-TEST_CASE("SQLite planner replaces changed indexes views and triggers", "[unit][sqlite][plan]") {
+TEST_CASE("SQLite planner replaces changed indexes views and triggers",
+          "[unit][sqlite][plan][SQT-014][SQT-015]") {
   const auto from = snapshot(R"sql(
     CREATE TABLE values_table(id INTEGER PRIMARY KEY, value TEXT);
     CREATE INDEX values_idx ON values_table(value);

@@ -27,7 +27,7 @@ const dbdiff::sqlite::IndexSnapshot& index_named(const dbdiff::sqlite::SchemaSna
 } // namespace
 
 TEST_CASE("SQLite statement scanning preserves trigger bodies and transaction boundaries",
-          "[unit][sqlite]") {
+          "[unit][sqlite][SQL-002]") {
   const std::string sql = R"sql(
     CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT);
     CREATE TRIGGER messages_audit AFTER INSERT ON messages BEGIN
@@ -51,7 +51,8 @@ TEST_CASE("SQLite statement scanning preserves trigger bodies and transaction bo
             .find("UPDATE messages") != std::string_view::npos);
 }
 
-TEST_CASE("SQLite inspection captures supported schema properties", "[unit][sqlite]") {
+TEST_CASE("SQLite inspection captures supported schema properties",
+          "[unit][sqlite][SQT-001][SQT-010][SQT-011][SQT-012][SQT-014][SQT-015]") {
   auto database = dbdiff::sqlite::Database::temporary();
   database.execute_source(R"sql(
     CREATE TABLE parent(
@@ -123,7 +124,7 @@ TEST_CASE("SQLite semantic hashes ignore schema formatting and identifier quotin
 }
 
 TEST_CASE("SQLite migration execution honors visible transactions and DML placement",
-          "[unit][sqlite]") {
+          "[unit][sqlite][SQL-003][MIG-005]") {
   auto database = dbdiff::sqlite::Database::temporary();
   database.execute_source("CREATE TABLE entries(id INTEGER PRIMARY KEY, value TEXT);");
 
@@ -145,7 +146,8 @@ TEST_CASE("SQLite migration execution honors visible transactions and DML placem
   CHECK_THROWS_AS(database.execute_migration("PRAGMA journal_mode=WAL;"), dbdiff::Error);
 }
 
-TEST_CASE("SQLite foreign-key validation rolls back a failed migration", "[unit][sqlite]") {
+TEST_CASE("SQLite foreign-key validation rolls back a failed migration",
+          "[unit][sqlite][SQT-012]") {
   auto database = dbdiff::sqlite::Database::temporary();
   database.execute_source(R"sql(
     CREATE TABLE parent(id INTEGER PRIMARY KEY);
@@ -171,7 +173,8 @@ TEST_CASE("SQLite foreign-key validation rolls back a failed migration", "[unit]
   )sql"));
 }
 
-TEST_CASE("SQLite declarative source execution rejects non-schema behavior", "[unit][sqlite]") {
+TEST_CASE("SQLite declarative source execution rejects non-schema behavior",
+          "[unit][sqlite][SRC-005][SQT-004]") {
   auto database = dbdiff::sqlite::Database::temporary();
   CHECK_THROWS_AS(
       database.execute_source("CREATE TABLE data(id INTEGER); INSERT INTO data VALUES (1);"),
