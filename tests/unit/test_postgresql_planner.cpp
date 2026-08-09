@@ -31,6 +31,16 @@ constexpr pg::ServerVersion pg15{150017, 15, 17};
       [hazard](const dbdiff::Operation& operation) { return operation.hazards.contains(hazard); });
 }
 
+[[nodiscard]] std::size_t occurrences(const std::string_view text, const std::string_view needle) {
+  std::size_t count = 0U;
+  std::size_t position = 0U;
+  while ((position = text.find(needle, position)) != std::string_view::npos) {
+    ++count;
+    position += needle.size();
+  }
+  return count;
+}
+
 } // namespace
 
 static_assert(std::is_move_constructible_v<pg::Database>);
@@ -89,6 +99,30 @@ TEST_CASE("PostgreSQL scanner rejects malformed and non-resumable scripts",
   CHECK_THROWS_AS(pg::parse_migration("SELECT 1;"), dbdiff::Error);
   CHECK_THROWS_AS(pg::parse_migration("SET standard_conforming_strings = off;"), dbdiff::Error);
   CHECK_THROWS_AS(pg::parse_migration("BEGIN; COMMIT AND CHAIN;"), dbdiff::Error);
+}
+
+TEST_CASE("PostgreSQL scanner rejects data-bearing sources and server-wide migrations",
+          "[unit][postgresql][scanner][SRC-005][SQL-001][PG-004]") {
+  CHECK_NOTHROW(
+      pg::validate_source("CREATE TABLE public.items ("
+                          "id bigint, doubled bigint GENERATED ALWAYS AS (id * 2) STORED);"));
+  CHECK_THROWS_AS(pg::validate_source("CREATE TABLE public.items AS SELECT 1 AS id;"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(
+      pg::validate_source("CREATE UNLOGGED TABLE public.items WITH (fillfactor = 80) AS "
+                          "SELECT 1 AS id;"),
+      dbdiff::Error);
+
+  CHECK_THROWS_AS(pg::parse_migration("CREATE DATABASE escaped;"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("ALTER ROLE app LOGIN;"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("DROP TABLESPACE shared_space;"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("ALTER SYSTEM SET work_mem = '1GB';"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("CREATE SUBSCRIPTION outside CONNECTION 'host=remote' "
+                                      "PUBLICATION changes;"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("CHECKPOINT;"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("GRANT cluster_admin TO app_user;"), dbdiff::Error);
+  CHECK_THROWS_AS(pg::parse_migration("COMMENT ON DATABASE postgres IS 'changed';"), dbdiff::Error);
 }
 
 TEST_CASE("PostgreSQL semantic hashes are normalized and version-patch independent",
@@ -290,4 +324,419 @@ TEST_CASE("PostgreSQL planner drafts ambiguous and data-dependent changes",
     const pg::SchemaSnapshot to{.server_version = {160000, 16, 0}, .schemas = {"public"}};
     CHECK_THROWS_AS(pg::plan(from, to), dbdiff::Error);
   }
+}
+
+TEST_CASE("PostgreSQL relational objects have deterministic semantic identities",
+          "[unit][postgresql][planner][hash][PG-001][PG-004][PG-014][PG-015][PG-020]") {
+  auto snapshot = pg::SchemaSnapshot{
+      .server_version = pg15,
+      .schemas = {"public"},
+      .tables =
+          {
+              pg::Table{
+                  .name = {"public", "items"},
+                  .row_security = true,
+                  .columns =
+                      {
+                          pg::Column{
+                              .position = 1, .name = "id", .type = "bigint", .not_null = true},
+                          pg::Column{.position = 2, .name = "title", .type = "text"},
+                          pg::Column{.position = 3, .name = "payload", .type = "text"},
+                      },
+              },
+          },
+      .constraints =
+          {
+              pg::TableConstraint{
+                  .table = {"public", "items"},
+                  .name = "items_title_check",
+                  .kind = pg::ConstraintKind::check,
+                  .columns = {"title"},
+                  .definition = "CHECK ((length(title) > 0))",
+              },
+              pg::TableConstraint{
+                  .table = {"public", "items"},
+                  .name = "items_pkey",
+                  .kind = pg::ConstraintKind::primary_key,
+                  .columns = {"id"},
+                  .definition = "PRIMARY KEY (id)",
+              },
+          },
+      .indexes =
+          {
+              pg::Index{
+                  .name = {"public", "items_search_idx"},
+                  .table = {"public", "items"},
+                  .method = "btree",
+                  .unique = true,
+                  .nulls_not_distinct = true,
+                  .key_expressions = {"lower(title)"},
+                  .included_columns = {"payload"},
+                  .predicate = "(title IS NOT NULL)",
+              },
+          },
+      .policies =
+          {
+              pg::RowSecurityPolicy{
+                  .table = {"public", "items"},
+                  .name = "items_read",
+                  .command = pg::PolicyCommand::select,
+                  .roles =
+                      {
+                          pg::PolicyRole{.public_role = true},
+                      },
+                  .using_expression = "(id > 0)",
+              },
+          },
+  };
+
+  const auto normalized = pg::normalize_snapshot(snapshot);
+  REQUIRE(normalized.constraints.size() == 2U);
+  CHECK(normalized.constraints[0].name == "items_pkey");
+  REQUIRE(normalized.policies[0].roles.size() == 1U);
+  CHECK(normalized.policies[0].roles[0].public_role);
+  CHECK(normalized.semantic_hash == pg::semantic_hash(normalized));
+
+  snapshot.indexes[0].predicate = "(title <> '')";
+  CHECK(pg::semantic_hash(snapshot) != normalized.semantic_hash);
+  snapshot.indexes[0].predicate = "(title IS NOT NULL)";
+  snapshot.constraints[0].validated = false;
+  CHECK(pg::semantic_hash(snapshot) != normalized.semantic_hash);
+  snapshot.constraints[0].validated = true;
+  snapshot.policies[0].permissive = false;
+  CHECK(pg::semantic_hash(snapshot) != normalized.semantic_hash);
+
+  snapshot.unsupported_objects = {
+      pg::UnsupportedCatalogObject{.kind = "view", .identity = "public.report"}};
+  CHECK_THROWS_AS(pg::normalize_snapshot(std::move(snapshot)), dbdiff::Error);
+
+  auto external_role = normalized;
+  external_role.policies[0].roles = {pg::PolicyRole{.name = "app_reader"}};
+  CHECK_THROWS_AS(pg::normalize_snapshot(std::move(external_role)), dbdiff::Error);
+}
+
+TEST_CASE("PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies",
+          "[unit][postgresql][planner][PG-001][PG-002][PG-014][PG-015][PG-020]") {
+  const pg::SchemaSnapshot from{.server_version = pg15, .schemas = {"public"}};
+  const pg::SchemaSnapshot to{
+      .server_version = pg15,
+      .schemas = {"public"},
+      .tables =
+          {
+              pg::Table{
+                  .name = {"public", "accounts"},
+                  .columns =
+                      {
+                          pg::Column{
+                              .position = 1, .name = "id", .type = "bigint", .not_null = true},
+                          pg::Column{.position = 2, .name = "featured_entry_id", .type = "bigint"},
+                      },
+              },
+              pg::Table{
+                  .name = {"public", "entries"},
+                  .row_security = true,
+                  .columns =
+                      {
+                          pg::Column{
+                              .position = 1, .name = "id", .type = "bigint", .not_null = true},
+                          pg::Column{.position = 2, .name = "account_id", .type = "bigint"},
+                          pg::Column{.position = 3, .name = "title", .type = "text"},
+                          pg::Column{.position = 4, .name = "payload", .type = "text"},
+                          pg::Column{.position = 5, .name = "deleted_at", .type = "timestamp"},
+                      },
+              },
+          },
+      .constraints =
+          {
+              pg::TableConstraint{
+                  .table = {"public", "accounts"},
+                  .name = "accounts_pkey",
+                  .kind = pg::ConstraintKind::primary_key,
+                  .columns = {"id"},
+                  .definition = "PRIMARY KEY (id)",
+              },
+              pg::TableConstraint{
+                  .table = {"public", "accounts"},
+                  .name = "accounts_featured_entry_fkey",
+                  .kind = pg::ConstraintKind::foreign_key,
+                  .columns = {"featured_entry_id"},
+                  .definition = "FOREIGN KEY (featured_entry_id) REFERENCES public.entries(id)",
+                  .referenced_table = pg::QualifiedName{"public", "entries"},
+                  .referenced_columns = {"id"},
+              },
+              pg::TableConstraint{
+                  .table = {"public", "entries"},
+                  .name = "entries_pkey",
+                  .kind = pg::ConstraintKind::primary_key,
+                  .columns = {"id"},
+                  .definition = "PRIMARY KEY (id)",
+              },
+              pg::TableConstraint{
+                  .table = {"public", "entries"},
+                  .name = "entries_account_fkey",
+                  .kind = pg::ConstraintKind::foreign_key,
+                  .columns = {"account_id"},
+                  .definition = "FOREIGN KEY (account_id) REFERENCES public.accounts(id)",
+                  .referenced_table = pg::QualifiedName{"public", "accounts"},
+                  .referenced_columns = {"id"},
+              },
+          },
+      .indexes =
+          {
+              pg::Index{
+                  .name = {"public", "entries_search_idx"},
+                  .table = {"public", "entries"},
+                  .method = "btree",
+                  .unique = true,
+                  .nulls_not_distinct = true,
+                  .key_expressions = {"lower(title)", "account_id DESC"},
+                  .included_columns = {"payload"},
+                  .predicate = "(deleted_at IS NULL)",
+              },
+          },
+      .policies =
+          {
+              pg::RowSecurityPolicy{
+                  .table = {"public", "entries"},
+                  .name = "entries_read",
+                  .command = pg::PolicyCommand::select,
+                  .roles = {pg::PolicyRole{.public_role = true}},
+                  .using_expression = "((account_id)::text = CURRENT_USER)",
+              },
+          },
+  };
+
+  const auto migration_plan = pg::plan(from, to);
+  CHECK_FALSE(migration_plan.draft);
+  CHECK(has_hazard(migration_plan, dbdiff::Hazard::constraint_scan));
+  CHECK(has_hazard(migration_plan, dbdiff::Hazard::write_lock));
+  const auto sql = pg::render_plan(migration_plan);
+  const auto accounts_table = sql.find("CREATE TABLE \"public\".\"accounts\"");
+  const auto entries_table = sql.find("CREATE TABLE \"public\".\"entries\"");
+  const auto accounts_key = sql.find("ADD CONSTRAINT \"accounts_pkey\"");
+  const auto entries_key = sql.find("ADD CONSTRAINT \"entries_pkey\"");
+  const auto accounts_fk = sql.find("ADD CONSTRAINT \"accounts_featured_entry_fkey\"");
+  const auto entries_fk = sql.find("ADD CONSTRAINT \"entries_account_fkey\"");
+  REQUIRE(accounts_table != std::string::npos);
+  REQUIRE(entries_table != std::string::npos);
+  REQUIRE(accounts_key != std::string::npos);
+  REQUIRE(entries_key != std::string::npos);
+  REQUIRE(accounts_fk != std::string::npos);
+  REQUIRE(entries_fk != std::string::npos);
+  CHECK(accounts_table < accounts_fk);
+  CHECK(entries_table < accounts_fk);
+  CHECK(accounts_key < entries_fk);
+  CHECK(entries_key < accounts_fk);
+  CHECK(sql.find("CREATE UNIQUE INDEX \"entries_search_idx\" ON \"public\".\"entries\" USING "
+                 "\"btree\" (lower(title), account_id DESC) "
+                 "INCLUDE (\"payload\") NULLS NOT DISTINCT WHERE (deleted_at IS NULL);") !=
+        std::string::npos);
+  CHECK(sql.find("CREATE POLICY \"entries_read\" ON \"public\".\"entries\" AS PERMISSIVE "
+                 "FOR SELECT TO PUBLIC USING (((account_id)::text = CURRENT_USER));") !=
+        std::string::npos);
+  CHECK(occurrences(sql, "CREATE INDEX") == 0U);
+  CHECK(occurrences(sql, "CREATE UNIQUE INDEX") == 1U);
+}
+
+TEST_CASE("PostgreSQL planner replaces referenced keys around foreign keys",
+          "[unit][postgresql][planner][PG-002][PG-014]") {
+  const auto tables = std::vector<pg::Table>{
+      pg::Table{
+          .name = {"public", "users"},
+          .columns =
+              {
+                  pg::Column{.position = 1, .name = "email", .type = "text", .not_null = true},
+              },
+      },
+      pg::Table{
+          .name = {"public", "sessions"},
+          .columns =
+              {
+                  pg::Column{.position = 1, .name = "user_email", .type = "text"},
+              },
+      },
+  };
+  const auto foreign_key = pg::TableConstraint{
+      .table = {"public", "sessions"},
+      .name = "sessions_user_email_fkey",
+      .kind = pg::ConstraintKind::foreign_key,
+      .columns = {"user_email"},
+      .definition = "FOREIGN KEY (user_email) REFERENCES public.users(email)",
+      .referenced_table = pg::QualifiedName{"public", "users"},
+      .referenced_columns = {"email"},
+  };
+  const pg::SchemaSnapshot from{
+      .server_version = pg15,
+      .schemas = {"public"},
+      .tables = tables,
+      .constraints =
+          {
+              pg::TableConstraint{
+                  .table = {"public", "users"},
+                  .name = "users_email_key",
+                  .kind = pg::ConstraintKind::unique,
+                  .columns = {"email"},
+                  .definition = "UNIQUE (email)",
+              },
+              foreign_key,
+          },
+  };
+  auto to = from;
+  to.constraints[0].definition = "UNIQUE NULLS NOT DISTINCT (email)";
+
+  const auto sql = pg::render_plan(pg::plan(from, to));
+  const auto drop_fk = sql.find("DROP CONSTRAINT \"sessions_user_email_fkey\"");
+  const auto drop_key = sql.find("DROP CONSTRAINT \"users_email_key\"");
+  const auto create_key = sql.find("ADD CONSTRAINT \"users_email_key\"");
+  const auto create_fk = sql.find("ADD CONSTRAINT \"sessions_user_email_fkey\"");
+  REQUIRE(drop_fk != std::string::npos);
+  REQUIRE(drop_key != std::string::npos);
+  REQUIRE(create_key != std::string::npos);
+  REQUIRE(create_fk != std::string::npos);
+  CHECK(drop_fk < drop_key);
+  CHECK(drop_key < create_key);
+  CHECK(create_key < create_fk);
+}
+
+TEST_CASE("PostgreSQL 18 named not-null constraints are ordered around primary keys",
+          "[unit][postgresql][planner][PG-002][PG-014]") {
+  constexpr pg::ServerVersion pg18{180000, 18, 0};
+  const auto table = pg::Table{
+      .name = {"public", "items"},
+      .columns = {pg::Column{.position = 1, .name = "id", .type = "bigint", .not_null = true}},
+  };
+
+  SECTION("create not-null before a lexically earlier primary key") {
+    const pg::SchemaSnapshot from{.server_version = pg18, .schemas = {"public"}};
+    const pg::SchemaSnapshot to{
+        .server_version = pg18,
+        .schemas = {"public"},
+        .tables = {table},
+        .constraints =
+            {
+                pg::TableConstraint{
+                    .table = {"public", "items"},
+                    .name = "a_items_pkey",
+                    .kind = pg::ConstraintKind::primary_key,
+                    .columns = {"id"},
+                    .definition = "PRIMARY KEY (id)",
+                },
+                pg::TableConstraint{
+                    .table = {"public", "items"},
+                    .name = "z_items_id_not_null",
+                    .kind = pg::ConstraintKind::not_null,
+                    .columns = {"id"},
+                    .definition = "NOT NULL id",
+                },
+            },
+    };
+
+    const auto sql = pg::render_plan(pg::plan(from, to));
+    const auto not_null = sql.find("ADD CONSTRAINT \"z_items_id_not_null\"");
+    const auto primary_key = sql.find("ADD CONSTRAINT \"a_items_pkey\"");
+    REQUIRE(not_null != std::string::npos);
+    REQUIRE(primary_key != std::string::npos);
+    CHECK(not_null < primary_key);
+  }
+
+  SECTION("drop a lexically later primary key before not-null") {
+    const pg::SchemaSnapshot from{
+        .server_version = pg18,
+        .schemas = {"public"},
+        .tables = {table},
+        .constraints =
+            {
+                pg::TableConstraint{
+                    .table = {"public", "items"},
+                    .name = "a_items_id_not_null",
+                    .kind = pg::ConstraintKind::not_null,
+                    .columns = {"id"},
+                    .definition = "NOT NULL id",
+                },
+                pg::TableConstraint{
+                    .table = {"public", "items"},
+                    .name = "z_items_pkey",
+                    .kind = pg::ConstraintKind::primary_key,
+                    .columns = {"id"},
+                    .definition = "PRIMARY KEY (id)",
+                },
+            },
+    };
+    const pg::SchemaSnapshot to{
+        .server_version = pg18,
+        .schemas = {"public"},
+        .tables = {pg::Table{
+            .name = {"public", "items"},
+            .columns = {pg::Column{.position = 1, .name = "id", .type = "bigint"}},
+        }},
+    };
+
+    const auto sql = pg::render_plan(pg::plan(from, to));
+    const auto primary_key = sql.find("DROP CONSTRAINT \"z_items_pkey\"");
+    const auto not_null = sql.find("DROP CONSTRAINT \"a_items_id_not_null\"");
+    REQUIRE(primary_key != std::string::npos);
+    REQUIRE(not_null != std::string::npos);
+    CHECK(primary_key < not_null);
+  }
+}
+
+TEST_CASE("PostgreSQL planner drops policies and indexes before dependent columns",
+          "[unit][postgresql][planner][PG-002][PG-015][PG-020]") {
+  const pg::SchemaSnapshot from{
+      .server_version = pg15,
+      .schemas = {"public"},
+      .tables =
+          {
+              pg::Table{
+                  .name = {"public", "items"},
+                  .row_security = true,
+                  .columns =
+                      {
+                          pg::Column{.position = 1, .name = "id", .type = "bigint"},
+                          pg::Column{.position = 2, .name = "legacy", .type = "text"},
+                      },
+              },
+          },
+      .indexes =
+          {
+              pg::Index{
+                  .name = {"public", "items_legacy_idx"},
+                  .table = {"public", "items"},
+                  .key_expressions = {"legacy"},
+                  .predicate = "(legacy IS NOT NULL)",
+              },
+          },
+      .policies =
+          {
+              pg::RowSecurityPolicy{
+                  .table = {"public", "items"},
+                  .name = "items_legacy",
+                  .command = pg::PolicyCommand::select,
+                  .roles = {pg::PolicyRole{.public_role = true}},
+                  .using_expression = "(legacy IS NOT NULL)",
+              },
+          },
+  };
+  const pg::SchemaSnapshot to{
+      .server_version = pg15,
+      .schemas = {"public"},
+      .tables =
+          {
+              pg::Table{
+                  .name = {"public", "items"},
+                  .row_security = true,
+                  .columns = {pg::Column{.position = 1, .name = "id", .type = "bigint"}},
+              },
+          },
+  };
+
+  const auto sql = pg::render_plan(pg::plan(from, to));
+  const auto drop_policy = sql.find("DROP POLICY \"items_legacy\"");
+  const auto drop_index = sql.find("DROP INDEX \"public\".\"items_legacy_idx\"");
+  const auto drop_column = sql.find("DROP COLUMN \"legacy\"");
+  REQUIRE(drop_policy != std::string::npos);
+  REQUIRE(drop_index != std::string::npos);
+  REQUIRE(drop_column != std::string::npos);
+  CHECK(drop_policy < drop_column);
+  CHECK(drop_index < drop_column);
 }
