@@ -13,13 +13,15 @@ add_executable(
   unit/test_postgresql.cpp
   unit/test_postgresql_planner.cpp
   unit/test_sqlite.cpp
+  unit/test_sqlite_hardening.cpp
+  unit/test_sqlite_history.cpp
   unit/test_sqlite_planner.cpp)
 target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_postgresql dbdiff_sqlite
                                                 Catch2::Catch2WithMain)
 dbdiff_set_warnings(dbdiff_unit_tests)
 dbdiff_enable_sanitizers(dbdiff_unit_tests)
 
-catch_discover_tests(dbdiff_unit_tests)
+catch_discover_tests(dbdiff_unit_tests PROPERTIES LABELS unit)
 
 if(DBDIFF_BUILD_INTEGRATION_TESTS)
   add_subdirectory(integration)
