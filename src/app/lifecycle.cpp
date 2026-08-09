@@ -37,6 +37,14 @@ struct ProjectInputs {
   std::vector<MigrationFile> migrations;
 };
 
+sqlite::ConnectionSettings sqlite_settings(const Config& config) {
+  return sqlite::ConnectionSettings{config.lock_timeout, config.statement_timeout};
+}
+
+postgresql::ConnectionSettings postgresql_settings(const Config& config) {
+  return postgresql::ConnectionSettings{config.lock_timeout, config.statement_timeout};
+}
+
 [[noreturn]] void lifecycle_error(const ErrorCode code, const std::string& message) {
   throw Error{code, message};
 }
@@ -149,6 +157,18 @@ AppliedPrefix validate_applied_history(const History& history,
     if (entry.engine_version.empty() || entry.attempted_file_sha256.size() != 64U) {
       lifecycle_error(ErrorCode::database,
                       "database migration history contains invalid immutable metadata");
+    }
+    try {
+      validate_engine_version(backend, entry.engine_version);
+    } catch (const Error&) {
+      lifecycle_error(ErrorCode::database,
+                      "database migration history contains an invalid engine version");
+    }
+    if (backend == BackendKind::postgresql &&
+        postgresql::parse_server_version(entry.engine_version).major !=
+            postgresql::parse_server_version(migration.metadata.engine_version).major) {
+      lifecycle_error(ErrorCode::drift,
+                      "database migration history records another PostgreSQL major");
     }
 
     const auto parsed = parse_migration(migration.sql);
@@ -433,10 +453,10 @@ std::string next_migration_version(const std::chrono::system_clock::time_point n
 
 CreateResult create_sqlite(ProjectInputs& project, const CreateOptions& options,
                            const Runtime& runtime) {
-  auto history = sqlite::Database::temporary();
+  auto history = sqlite::Database::temporary(sqlite_settings(project.config));
   const auto from = replay_sqlite(project.migrations, history);
 
-  auto master = sqlite::Database::temporary();
+  auto master = sqlite::Database::temporary(sqlite_settings(project.config));
   master.execute_source(concatenate_sources(project.sources));
   const auto to = master.inspect();
   if (from.semantic_hash == to.semantic_hash) {
@@ -467,8 +487,10 @@ CreateResult create_sqlite(ProjectInputs& project, const CreateOptions& options,
 CreateResult create_postgresql(ProjectInputs& project, const CreateOptions& options,
                                const Runtime& runtime) {
   auto provisioning = provision_postgresql(project.config, runtime);
-  auto history = postgresql::ScratchDatabase::create(provisioning.locator);
-  auto master = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto history = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                     postgresql_settings(project.config));
+  auto master = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                    postgresql_settings(project.config));
 
   const auto from = replay_postgresql(project.migrations, history, project.config.managed_schemas);
   master.execute_sources(project.sources);
@@ -516,9 +538,9 @@ CreateResult create_postgresql(ProjectInputs& project, const CreateOptions& opti
 }
 
 sqlite::SchemaSnapshot require_complete_sqlite_reconstruction(ProjectInputs& project) {
-  auto history = sqlite::Database::temporary();
+  auto history = sqlite::Database::temporary(sqlite_settings(project.config));
   const auto reconstructed = replay_sqlite(project.migrations, history);
-  auto master = sqlite::Database::temporary();
+  auto master = sqlite::Database::temporary(sqlite_settings(project.config));
   master.execute_source(concatenate_sources(project.sources));
   const auto desired = master.inspect();
   if (reconstructed.semantic_hash != desired.semantic_hash) {
@@ -572,14 +594,16 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
 
   std::optional<sqlite::Database> target;
   if (existed) {
-    target.emplace(sqlite::Database::open(path, options.dry_run ? sqlite::OpenMode::read_only
-                                                                : sqlite::OpenMode::read_write));
+    target.emplace(sqlite::Database::open(
+        path, options.dry_run ? sqlite::OpenMode::read_only : sqlite::OpenMode::read_write,
+        sqlite_settings(project.config)));
   }
 
   const auto history = target ? target->read_history() : sqlite::MigrationHistory{};
-  auto prefix_database = sqlite::Database::temporary();
+  auto prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
   const auto prefix = reconstruct_sqlite_prefix(history, project.migrations, prefix_database);
-  const auto live = target ? target->inspect() : sqlite::Database::temporary().inspect();
+  const auto live = target ? target->inspect()
+                           : sqlite::Database::temporary(sqlite_settings(project.config)).inspect();
   if (live.semantic_hash != prefix.snapshot.semantic_hash) {
     lifecycle_error(ErrorCode::drift,
                     "live SQLite schema differs from its reconstructed migration prefix");
@@ -596,7 +620,7 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
   }
 
   if (options.validate_data) {
-    auto validation = sqlite::Database::temporary();
+    auto validation = sqlite::Database::temporary(sqlite_settings(project.config));
     if (target) {
       target->backup_to(validation);
     }
@@ -612,11 +636,12 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
     return ApplyResult{pending, 0, true};
   }
   if (!target) {
-    target.emplace(sqlite::Database::open(path, sqlite::OpenMode::read_write_create));
+    target.emplace(sqlite::Database::open(path, sqlite::OpenMode::read_write_create,
+                                          sqlite_settings(project.config)));
   }
 
   const auto repeated_history = target->read_history();
-  auto repeated_prefix_database = sqlite::Database::temporary();
+  auto repeated_prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
   const auto repeated =
       reconstruct_sqlite_prefix(repeated_history, project.migrations, repeated_prefix_database);
   if (repeated.prefix != prefix.prefix ||
@@ -642,8 +667,9 @@ StatusResult status_sqlite(ProjectInputs& project, const Runtime& runtime) {
                         "SQLite database is missing"};
   }
 
-  auto target = sqlite::Database::open(path, sqlite::OpenMode::read_only);
-  auto prefix_database = sqlite::Database::temporary();
+  auto target =
+      sqlite::Database::open(path, sqlite::OpenMode::read_only, sqlite_settings(project.config));
+  auto prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
   const auto prefix =
       reconstruct_sqlite_prefix(target.read_history(), project.migrations, prefix_database);
   if (target.inspect().semantic_hash != prefix.snapshot.semantic_hash) {
@@ -663,10 +689,12 @@ StatusResult status_sqlite(ProjectInputs& project, const Runtime& runtime) {
 postgresql::SchemaSnapshot
 require_complete_postgresql_reconstruction(ProjectInputs& project,
                                            PostgresProvisioning& provisioning) {
-  auto history = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto history = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                     postgresql_settings(project.config));
   const auto reconstructed =
       replay_postgresql(project.migrations, history, project.config.managed_schemas);
-  auto master = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto master = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                    postgresql_settings(project.config));
   master.execute_sources(project.sources);
   const auto desired = master.introspect(project.config.managed_schemas);
   if (reconstructed.semantic_hash != desired.semantic_hash) {
@@ -718,13 +746,15 @@ ApplyResult apply_postgresql(ProjectInputs& project, const ApplyOptions& options
   auto provisioning = provision_postgresql(project.config, runtime);
   const auto desired = require_complete_postgresql_reconstruction(project, provisioning);
 
-  auto target = postgresql::Database::open(require_target_locator(project.config, runtime));
+  auto target = postgresql::Database::open(require_target_locator(project.config, runtime),
+                                           postgresql_settings(project.config));
   if (target.server_version().major != desired.server_version.major) {
     lifecycle_error(ErrorCode::unsupported,
                     "target and scratch PostgreSQL major versions must match");
   }
   const auto history = target.read_history();
-  auto prefix_database = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto prefix_database = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                             postgresql_settings(project.config));
   const auto prefix = reconstruct_postgresql_prefix(history, project.migrations, prefix_database,
                                                     project.config.managed_schemas);
   if (target.introspect(project.config.managed_schemas).semantic_hash !=
@@ -747,7 +777,8 @@ ApplyResult apply_postgresql(ProjectInputs& project, const ApplyOptions& options
   }
 
   const auto repeated_history = target.read_history();
-  auto repeated_prefix_database = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto repeated_prefix_database = postgresql::ScratchDatabase::create(
+      provisioning.locator, postgresql_settings(project.config));
   const auto repeated =
       reconstruct_postgresql_prefix(repeated_history, project.migrations, repeated_prefix_database,
                                     project.config.managed_schemas);
@@ -770,12 +801,14 @@ ApplyResult apply_postgresql(ProjectInputs& project, const ApplyOptions& options
 StatusResult status_postgresql(ProjectInputs& project, const Runtime& runtime) {
   auto provisioning = provision_postgresql(project.config, runtime);
   const auto desired = require_complete_postgresql_reconstruction(project, provisioning);
-  auto target = postgresql::Database::open(require_target_locator(project.config, runtime));
+  auto target = postgresql::Database::open(require_target_locator(project.config, runtime),
+                                           postgresql_settings(project.config));
   if (target.server_version().major != desired.server_version.major) {
     lifecycle_error(ErrorCode::unsupported,
                     "target and scratch PostgreSQL major versions must match");
   }
-  auto prefix_database = postgresql::ScratchDatabase::create(provisioning.locator);
+  auto prefix_database = postgresql::ScratchDatabase::create(provisioning.locator,
+                                                             postgresql_settings(project.config));
   const auto prefix = reconstruct_postgresql_prefix(
       target.read_history(), project.migrations, prefix_database, project.config.managed_schemas);
   if (target.introspect(project.config.managed_schemas).semantic_hash !=
@@ -923,11 +956,13 @@ std::vector<RecoveredRevision> recover_migration(const RecoverOptions& options,
     if (!sqlite_target_exists(path)) {
       lifecycle_error(ErrorCode::database, "SQLite target does not exist");
     }
-    const auto target = sqlite::Database::open(path, sqlite::OpenMode::read_only);
+    const auto target =
+        sqlite::Database::open(path, sqlite::OpenMode::read_only, sqlite_settings(config));
     return convert_revisions(target.recover_revisions(options.version), options.version);
   }
 
-  const auto target = postgresql::Database::open(require_target_locator(config, runtime));
+  const auto target = postgresql::Database::open(require_target_locator(config, runtime),
+                                                 postgresql_settings(config));
   return convert_revisions(target.recover_revisions(options.version), options.version);
 }
 

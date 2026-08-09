@@ -87,6 +87,12 @@ TEST_CASE("configuration rejects unknown, ambiguous, and advanced YAML", "[unit]
         "format: 1\nbackend: sqlite\nsources: [a.sql]\nmigrations: m\nlock_timeout: 5\n");
     CHECK_THROWS_AS(dbdiff::load_config(file), dbdiff::Error);
   }
+  SECTION("duration exceeds backend range") {
+    const auto file = temporary.write(
+        "duration-range.yaml", "format: 1\nbackend: sqlite\nsources: [a.sql]\nmigrations: m\n"
+                               "statement_timeout: 3000000000ms\n");
+    CHECK_THROWS_AS(dbdiff::load_config(file), dbdiff::Error);
+  }
   SECTION("duplicate key") {
     const auto file =
         temporary.write("duplicate.yaml", "format: 1\nbackend: sqlite\nbackend: postgresql\n"

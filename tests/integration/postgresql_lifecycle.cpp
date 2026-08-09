@@ -103,6 +103,23 @@ TEST_CASE("PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drif
   INFO("PostgreSQL " << container_options.postgres_major << " target " << container.redacted_dsn());
   REQUIRE(scratch_database_count(container, runner) == "0");
 
+  {
+    auto timed = postgresql::Database::open(
+        container.connection_dsn(),
+        postgresql::ConnectionSettings{.lock_timeout = 1s, .statement_timeout = 25ms});
+    CHECK_THROWS_AS(timed.execute_migration(R"sql(
+BEGIN;
+DO $body$
+BEGIN
+  PERFORM pg_catalog.pg_sleep(1);
+END;
+$body$;
+COMMIT;
+)sql"),
+                    dbdiff::Error);
+    CHECK_NOTHROW(timed.introspect({"public"}));
+  }
+
   dbdiff::test::TempDirectory project;
   project.write("schema/00_core.sql", R"sql(
 CREATE TABLE public.accounts(

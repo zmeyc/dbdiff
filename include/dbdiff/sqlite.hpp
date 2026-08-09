@@ -4,6 +4,7 @@
 #include "dbdiff/hazard.hpp"
 #include "dbdiff/script.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -162,10 +163,18 @@ struct MigrationApplyResult {
   bool operator==(const MigrationApplyResult&) const = default;
 };
 
+struct ConnectionSettings {
+  std::chrono::milliseconds lock_timeout{5000};
+  std::chrono::milliseconds statement_timeout{300000};
+
+  bool operator==(const ConnectionSettings&) const = default;
+};
+
 class Database final {
 public:
-  [[nodiscard]] static Database temporary();
-  [[nodiscard]] static Database open(const std::filesystem::path& path, OpenMode mode);
+  [[nodiscard]] static Database temporary(ConnectionSettings settings = {});
+  [[nodiscard]] static Database open(const std::filesystem::path& path, OpenMode mode,
+                                     ConnectionSettings settings = {});
 
   ~Database();
   Database(Database&&) noexcept;

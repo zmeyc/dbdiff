@@ -4,6 +4,7 @@
 #include "dbdiff/hash.hpp"
 #include "dbdiff/source.hpp"
 
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -179,6 +180,41 @@ void sync_directory(const std::filesystem::path& directory) {
 
 } // namespace
 
+void validate_engine_version(const BackendKind backend, const std::string_view version) {
+  if (backend == BackendKind::postgresql) {
+    int number = 0;
+    const auto [end, error] =
+        std::from_chars(version.data(), version.data() + version.size(), number);
+    if (error != std::errc{} || end != version.data() + version.size() || number < 150000 ||
+        number >= 190000) {
+      migration_error("PostgreSQL migration engine version must identify major 15 through 18");
+    }
+    return;
+  }
+
+  std::array<int, 3> components{};
+  std::size_t begin = 0U;
+  for (std::size_t index = 0U; index < components.size(); ++index) {
+    const auto end_position =
+        index + 1U == components.size() ? version.size() : version.find('.', begin);
+    if (end_position == std::string_view::npos || end_position == begin) {
+      migration_error("SQLite migration engine version must use major.minor.patch");
+    }
+    const auto component = version.substr(begin, end_position - begin);
+    const auto [end, error] =
+        std::from_chars(component.data(), component.data() + component.size(), components[index]);
+    if (error != std::errc{} || end != component.data() + component.size() ||
+        components[index] < 0 || components[index] > 999) {
+      migration_error("SQLite migration engine version must use numeric major.minor.patch");
+    }
+    begin = end_position + 1U;
+  }
+  const auto encoded = components[0] * 1'000'000 + components[1] * 1'000 + components[2];
+  if (encoded < 3'045'000) {
+    migration_error("SQLite migration engine version must be 3.45.0 or newer");
+  }
+}
+
 MigrationMetadata parse_migration_metadata(const std::string_view sql) {
   constexpr std::string_view prefix{"-- dbdiff: "};
   std::map<std::string, std::string, std::less<>> values;
@@ -244,6 +280,7 @@ MigrationMetadata parse_migration_metadata(const std::string_view sql) {
   metadata.backend = parse_backend(required_value(values, "backend"));
   metadata.version = required_value(values, "version");
   metadata.engine_version = required_value(values, "engine-version");
+  validate_engine_version(metadata.backend, metadata.engine_version);
   metadata.from_sha256 = required_value(values, "from-sha256");
   metadata.to_sha256 = required_value(values, "to-sha256");
   metadata.source_set_sha256 = required_value(values, "source-set-sha256");
@@ -265,6 +302,7 @@ std::string render_migration_metadata(const MigrationMetadata& metadata) {
   if (metadata.version.empty() || metadata.engine_version.empty()) {
     migration_error("migration metadata version and engine version must not be empty");
   }
+  validate_engine_version(metadata.backend, metadata.engine_version);
   static_cast<void>(validate_migration_filename(metadata.version + ".sql"));
   require_hash(metadata.from_sha256, "from-sha256");
   require_hash(metadata.to_sha256, "to-sha256");
