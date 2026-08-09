@@ -8,6 +8,17 @@ catch_discover_tests(
   TEST_PREFIX "integration.docker."
   PROPERTIES LABELS integration.docker)
 
+add_executable(dbdiff_postgresql_lifecycle_integration_tests postgresql_lifecycle.cpp)
+target_link_libraries(dbdiff_postgresql_lifecycle_integration_tests
+                      PRIVATE dbdiff_app Catch2::Catch2WithMain)
+dbdiff_set_warnings(dbdiff_postgresql_lifecycle_integration_tests)
+dbdiff_enable_sanitizers(dbdiff_postgresql_lifecycle_integration_tests)
+
+catch_discover_tests(
+  dbdiff_postgresql_lifecycle_integration_tests
+  TEST_PREFIX "integration.postgresql.lifecycle."
+  PROPERTIES LABELS integration.postgresql TIMEOUT 900)
+
 find_program(DBDIFF_BASH_EXECUTABLE NAMES bash)
 if(DBDIFF_BASH_EXECUTABLE)
   add_test(
