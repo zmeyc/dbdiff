@@ -79,6 +79,8 @@ APP-002	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is iso
 APP-003	unit	SQLite apply, status, drift, and recover use only database-recorded history
 APP-003	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 APP-003	manual	004_sqlite_drift_isolation
+APP-004	unit	all lifecycle entry points honor the bounded project lock
+APP-004	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 APP-005	unit	SQLite apply, status, drift, and recover use only database-recorded history
 APP-005	unit	SQLite data validation uses an online copy and never mutates the target on failure
 APP-005	integration	dbdiff_cli_lifecycle_integration
@@ -138,5 +140,7 @@ SCR-004	unit	Docker PostgreSQL destructor performs verified best-effort cleanup
 SCR-004	integration	integration.docker.Docker PostgreSQL scratch is reachable and explicitly removable
 SCR-005	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
 OPS-001	integration	integration.docker.System process runner preserves argv boundaries and enforces timeout
+OPS-002	unit	all lifecycle entry points honor the bounded project lock
+OPS-002	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 OPS-004	unit	SQLite connection settings enforce lock and statement deadlines
 OPS-004	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated

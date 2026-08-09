@@ -32,7 +32,7 @@ MIG-006	migration	supported	unit	Engine metadata is backend-formatted and invali
 APP-001	apply	supported	unit+integration	Complete history applied-prefix and master reconstruction gates run before live writes
 APP-002	apply	supported	unit+integration	Live schema comparison uses only the reconstructed applied migration prefix
 APP-003	apply	supported	unit+integration	Live drift blocks apply and is never converted into repair SQL
-APP-004	apply	planned	-	One lifecycle lock covers ownership history drift validation and all live writes with a repeated pre-write check
+APP-004	apply	supported	unit+integration	A cooperative project lock spans every lifecycle command and a PostgreSQL target lock spans history drift validation repeated pre-write validation and live writes
 APP-005	apply	supported	unit+integration	Dry-run and failed data validation write neither target schema nor migration history
 APP-006	apply	supported	unit+integration	Status missing-target creation read-only inspection and exact revision recovery are available through the lifecycle
 SQT-001	sqlite	supported	unit	Managed SQLite tables indexes views and triggers create drop render and reconstruct to the same semantic snapshot
@@ -77,6 +77,6 @@ UPG-002	upgrade	planned	-	A no-schema major transition gates ordinary create unt
 UPG-003	upgrade	planned	-	Transition apply refuses old targets version mismatches and downgrades
 UPG-004	upgrade	planned	-	Post-upgrade live state must equal reconstruction on the new major
 OPS-001	operations	supported	integration	The external process runner preserves argv boundaries and terminates timed-out children
-OPS-002	operations	planned	-	Concurrent lifecycle executors serialize without an unlocked validation-to-write interval
+OPS-002	operations	supported	unit+integration	Concurrent commands using one project configuration serialize and PostgreSQL sessions also serialize per target within the configured lock deadline
 OPS-003	operations	planned	-	Cancellation disconnect and exceptional exits synchronously report or clean every owned scratch resource
 OPS-004	operations	supported	unit+integration	Configured SQLite lock and statement deadlines and PostgreSQL statement deadlines interrupt bounded operations

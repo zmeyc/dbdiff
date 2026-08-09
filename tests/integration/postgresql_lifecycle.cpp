@@ -82,7 +82,7 @@ std::string postgres_config(const std::string_view scratch_locator) {
 
 TEST_CASE("PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated",
           "[integration][docker][postgresql][lifecycle][CRE-001][APP-001][APP-002][APP-003]"
-          "[APP-005][MIG-004][SCR-002][SCR-004]") {
+          "[APP-004][APP-005][MIG-004][OPS-002][SCR-002][SCR-004]") {
   auto runner = docker::make_system_process_runner();
   const auto docker_status = runner->run({"docker", "info", "--format", "{{.ServerVersion}}"}, 10s);
   if (!docker_status.succeeded()) {
@@ -119,6 +119,24 @@ COMMIT;
                     dbdiff::Error);
     CHECK_NOTHROW(timed.introspect({"public"}));
   }
+
+  auto contender = postgresql::Database::open(
+      container.connection_dsn(),
+      postgresql::ConnectionSettings{.lock_timeout = 25ms, .statement_timeout = 1s});
+  const auto acquire_contender_lock = [&contender] {
+    const auto lock = contender.acquire_lifecycle_lock();
+    static_cast<void>(lock);
+  };
+  std::optional<postgresql::LifecycleLock> held;
+  {
+    auto owner = postgresql::Database::open(container.connection_dsn());
+    held.emplace(owner.acquire_lifecycle_lock());
+    CHECK_NOTHROW(owner.read_history());
+    CHECK_THROWS_AS(acquire_contender_lock(), dbdiff::Error);
+  }
+  CHECK_THROWS_AS(acquire_contender_lock(), dbdiff::Error);
+  held.reset();
+  CHECK_NOTHROW(acquire_contender_lock());
 
   dbdiff::test::TempDirectory project;
   project.write("schema/00_core.sql", R"sql(

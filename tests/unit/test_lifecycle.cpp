@@ -7,9 +7,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <filesystem>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -44,6 +49,30 @@ sources:
 migrations: migrations
 )yaml");
 }
+
+class ScopedFileLock final {
+public:
+  explicit ScopedFileLock(const std::filesystem::path& file) {
+    descriptor_ = ::open(file.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor_ == -1 || ::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
+      if (descriptor_ != -1) {
+        static_cast<void>(::close(descriptor_));
+      }
+      throw std::runtime_error{"could not acquire test file lock"};
+    }
+  }
+
+  ScopedFileLock(const ScopedFileLock&) = delete;
+  ScopedFileLock& operator=(const ScopedFileLock&) = delete;
+
+  ~ScopedFileLock() {
+    static_cast<void>(::flock(descriptor_, LOCK_UN));
+    static_cast<void>(::close(descriptor_));
+  }
+
+private:
+  int descriptor_{-1};
+};
 
 } // namespace
 
@@ -92,6 +121,41 @@ TEST_CASE("create requires every generated hazard before saving", "[unit][PLN-00
   CHECK_THROWS_AS(dbdiff::create_migration(dbdiff::CreateOptions{config, "initial", {}}, runtime),
                   dbdiff::Error);
   CHECK_FALSE(std::filesystem::exists(directory.path() / "migrations"));
+  CHECK(environment_calls == 0);
+}
+
+TEST_CASE("all lifecycle entry points honor the bounded project lock", "[unit][APP-004][OPS-002]") {
+  dbdiff::test::TempDirectory directory;
+  directory.write("schema.sql", "CREATE TABLE locked(id INTEGER PRIMARY KEY);\n");
+  const auto config = directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database_env: LOCKED_TARGET
+sources: [schema.sql]
+migrations: migrations
+lock_timeout: 25ms
+)yaml");
+  int environment_calls = 0;
+  const auto runtime = fixed_runtime(environment_calls);
+
+  {
+    const ScopedFileLock held{config};
+    CHECK_THROWS_AS(
+        dbdiff::create_migration(
+            dbdiff::CreateOptions{config, "blocked", {dbdiff::Hazard::write_lock}}, runtime),
+        dbdiff::Error);
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, true, false, false, false}, runtime),
+        dbdiff::Error);
+    CHECK_THROWS_AS(dbdiff::project_status(config, runtime), dbdiff::Error);
+    CHECK_THROWS_AS(
+        dbdiff::recover_migration(dbdiff::RecoverOptions{config, "version", false}, runtime),
+        dbdiff::Error);
+    CHECK(environment_calls == 0);
+  }
+
+  const auto created = dbdiff::create_migration(
+      dbdiff::CreateOptions{config, "unblocked", {dbdiff::Hazard::write_lock}}, runtime);
+  CHECK(created.created);
   CHECK(environment_calls == 0);
 }
 
