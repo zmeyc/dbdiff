@@ -10,7 +10,9 @@
 #include <cctype>
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -46,6 +48,16 @@ constexpr int minimum_sqlite_version = 3'045'000;
 [[nodiscard]] bool starts_with_reserved_name(const std::string_view name) {
   const auto key = ascii_lower(name);
   return key.starts_with("sqlite_") || key.starts_with("_dbdiff_");
+}
+
+[[nodiscard]] bool is_dbdiff_reserved_name(const std::string_view name) {
+  return ascii_lower(name).starts_with("_dbdiff_");
+}
+
+[[nodiscard]] bool is_history_table(const std::string_view name) {
+  const auto key = ascii_lower(name);
+  return key == "_dbdiff_migrations" || key == "_dbdiff_migration_revisions" ||
+         key == "_dbdiff_migration_units";
 }
 
 [[nodiscard]] std::string sqlite_error_message(sqlite3* database, const int result,
@@ -113,6 +125,24 @@ public:
     }
   }
 
+  void bind_blob(const int index, const std::string_view value) {
+    if (value.size() > static_cast<std::size_t>(INT_MAX)) {
+      throw Error{ErrorCode::database, "SQLite bound value exceeds the supported size"};
+    }
+    const auto result = sqlite3_bind_blob(statement_, index, value.data(),
+                                          static_cast<int>(value.size()), SQLITE_TRANSIENT);
+    if (result != SQLITE_OK) {
+      throw_sqlite(database_, result, "binding statement value");
+    }
+  }
+
+  void bind_integer(const int index, const sqlite3_int64 value) {
+    const auto result = sqlite3_bind_int64(statement_, index, value);
+    if (result != SQLITE_OK) {
+      throw_sqlite(database_, result, "binding statement value");
+    }
+  }
+
   [[nodiscard]] int step() {
     const auto result = sqlite3_step(statement_);
     if (result != SQLITE_ROW && result != SQLITE_DONE) {
@@ -123,6 +153,10 @@ public:
 
   [[nodiscard]] int integer(const int column) const {
     return sqlite3_column_int(statement_, column);
+  }
+
+  [[nodiscard]] sqlite3_int64 integer64(const int column) const {
+    return sqlite3_column_int64(statement_, column);
   }
 
   [[nodiscard]] std::optional<std::string> optional_text(const int column) const {
@@ -143,6 +177,21 @@ public:
       throw Error{ErrorCode::database, "SQLite returned NULL for a required text column"};
     }
     return std::move(*value);
+  }
+
+  [[nodiscard]] std::string blob(const int column) const {
+    if (sqlite3_column_type(statement_, column) == SQLITE_NULL) {
+      throw Error{ErrorCode::database, "SQLite returned NULL for a required blob column"};
+    }
+    const auto* value = sqlite3_column_blob(statement_, column);
+    const auto size = sqlite3_column_bytes(statement_, column);
+    if ((value == nullptr && size != 0) || size < 0) {
+      throw Error{ErrorCode::database, "SQLite returned an invalid blob column"};
+    }
+    if (size == 0) {
+      return {};
+    }
+    return std::string{static_cast<const char*>(value), static_cast<std::size_t>(size)};
   }
 
 private:
@@ -267,6 +316,12 @@ private:
   return words;
 }
 
+[[nodiscard]] bool references_reserved_metadata(const std::string_view sql) {
+  const auto words = statement_words(sql, sql.size());
+  return std::ranges::any_of(words,
+                             [](const std::string& word) { return word.starts_with("_dbdiff_"); });
+}
+
 [[nodiscard]] StatementKind classify_statement(const std::string_view sql) {
   const auto words = statement_words(sql, 4U);
   if (words.empty()) {
@@ -382,6 +437,127 @@ private:
     return false;
   }
   return words[1] == "temp" || words[1] == "temporary" || words[1] == "virtual";
+}
+
+enum class SqlTokenKind : std::uint8_t { word, quoted_identifier, string_literal, punctuation };
+
+struct SqlToken {
+  SqlTokenKind kind{SqlTokenKind::punctuation};
+  std::string value;
+};
+
+[[nodiscard]] std::vector<SqlToken> sql_tokens(const std::string_view sql) {
+  std::vector<SqlToken> tokens;
+  std::size_t position = 0;
+  while (position < sql.size()) {
+    position = skip_space_and_comments(sql, position);
+    if (position >= sql.size()) {
+      break;
+    }
+
+    const auto character = sql[position];
+    if (is_word_start(character)) {
+      const auto begin = position++;
+      while (position < sql.size() && is_word_continue(sql[position])) {
+        ++position;
+      }
+      tokens.push_back(
+          SqlToken{SqlTokenKind::word, ascii_lower(sql.substr(begin, position - begin))});
+      continue;
+    }
+    if (character == '"' || character == '`' || character == '[') {
+      const auto closing = character == '[' ? ']' : character;
+      ++position;
+      std::string identifier;
+      bool closed = false;
+      while (position < sql.size()) {
+        if (sql[position] == closing) {
+          if (character != '[' && position + 1U < sql.size() && sql[position + 1U] == closing) {
+            identifier.push_back(closing);
+            position += 2U;
+            continue;
+          }
+          ++position;
+          closed = true;
+          break;
+        }
+        identifier.push_back(sql[position++]);
+      }
+      if (!closed) {
+        throw_migration("unterminated quoted identifier in SQLite script");
+      }
+      tokens.push_back(SqlToken{SqlTokenKind::quoted_identifier, ascii_lower(identifier)});
+      continue;
+    }
+    if (character == '\'') {
+      ++position;
+      bool closed = false;
+      while (position < sql.size()) {
+        if (sql[position] == '\'') {
+          if (position + 1U < sql.size() && sql[position + 1U] == '\'') {
+            position += 2U;
+            continue;
+          }
+          ++position;
+          closed = true;
+          break;
+        }
+        ++position;
+      }
+      if (!closed) {
+        throw_migration("unterminated string literal in SQLite script");
+      }
+      tokens.push_back(SqlToken{SqlTokenKind::string_literal, {}});
+      continue;
+    }
+    tokens.push_back(SqlToken{SqlTokenKind::punctuation, std::string{character}});
+    ++position;
+  }
+  return tokens;
+}
+
+[[nodiscard]] bool is_keyword(const SqlToken& token, const std::string_view keyword) {
+  return token.kind == SqlTokenKind::word && token.value == keyword;
+}
+
+[[nodiscard]] bool is_identifier(const SqlToken& token) {
+  return token.kind == SqlTokenKind::word || token.kind == SqlTokenKind::quoted_identifier;
+}
+
+[[nodiscard]] bool ddl_targets_unsupported_schema(const std::string_view sql) {
+  const auto tokens = sql_tokens(sql);
+  if (tokens.size() < 2U) {
+    return false;
+  }
+
+  std::size_t position = 1U;
+  if (is_keyword(tokens[0], "create")) {
+    if (is_keyword(tokens[position], "temp") || is_keyword(tokens[position], "temporary") ||
+        is_keyword(tokens[position], "virtual")) {
+      return true;
+    }
+    if (is_keyword(tokens[position], "unique")) {
+      ++position;
+    }
+  }
+
+  if (position >= tokens.size() ||
+      (!is_keyword(tokens[position], "table") && !is_keyword(tokens[position], "index") &&
+       !is_keyword(tokens[position], "view") && !is_keyword(tokens[position], "trigger"))) {
+    return false;
+  }
+  ++position;
+  if (position + 2U < tokens.size() && is_keyword(tokens[position], "if") &&
+      is_keyword(tokens[position + 1U], "not") && is_keyword(tokens[position + 2U], "exists")) {
+    position += 3U;
+  } else if (position + 1U < tokens.size() && is_keyword(tokens[position], "if") &&
+             is_keyword(tokens[position + 1U], "exists")) {
+    position += 2U;
+  }
+
+  return position + 2U < tokens.size() && is_identifier(tokens[position]) &&
+         tokens[position + 1U].kind == SqlTokenKind::punctuation &&
+         tokens[position + 1U].value == "." && tokens[position].value != "main";
 }
 
 void append_canonical_token(std::string& output, const char kind, const std::string_view value) {
@@ -500,6 +676,31 @@ void execute_one(sqlite3* database, const std::string_view sql,
   }
 }
 
+int deny_unsafe_schema_action(void*, const int action, const char*, const char* second_argument,
+                              const char*, const char*) noexcept {
+  switch (action) {
+  case SQLITE_ATTACH:
+  case SQLITE_DETACH:
+  case SQLITE_CREATE_VTABLE:
+  case SQLITE_DROP_VTABLE:
+  case SQLITE_CREATE_TEMP_INDEX:
+  case SQLITE_CREATE_TEMP_TABLE:
+  case SQLITE_CREATE_TEMP_TRIGGER:
+  case SQLITE_CREATE_TEMP_VIEW:
+  case SQLITE_DROP_TEMP_INDEX:
+  case SQLITE_DROP_TEMP_TABLE:
+  case SQLITE_DROP_TEMP_TRIGGER:
+  case SQLITE_DROP_TEMP_VIEW:
+    return SQLITE_DENY;
+  case SQLITE_FUNCTION:
+    return second_argument != nullptr && sqlite3_stricmp(second_argument, "load_extension") == 0
+               ? SQLITE_DENY
+               : SQLITE_OK;
+  default:
+    return SQLITE_OK;
+  }
+}
+
 [[nodiscard]] int query_integer(sqlite3* database, const std::string_view sql) {
   Statement statement{database, sql};
   if (!statement.valid()) {
@@ -551,6 +752,15 @@ void configure_database(sqlite3* database) {
     }
   }
 
+  static_cast<void>(sqlite3_limit(database, SQLITE_LIMIT_ATTACHED, 0));
+  if (sqlite3_limit(database, SQLITE_LIMIT_ATTACHED, -1) != 0) {
+    throw Error{ErrorCode::unsupported, "SQLite attached databases could not be disabled"};
+  }
+  result = sqlite3_set_authorizer(database, deny_unsafe_schema_action, nullptr);
+  if (result != SQLITE_OK) {
+    throw_sqlite(database, result, "installing SQLite schema safety policy");
+  }
+
   execute_one(database, "PRAGMA foreign_keys=ON;");
   if (query_integer(database, "PRAGMA foreign_keys;") != 1) {
     throw Error{ErrorCode::unsupported, "SQLite foreign-key enforcement could not be enabled"};
@@ -558,7 +768,7 @@ void configure_database(sqlite3* database) {
 }
 
 [[nodiscard]] int open_flags(const OpenMode mode) {
-  constexpr auto common = SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE;
+  constexpr auto common = SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE | SQLITE_OPEN_PRIVATECACHE;
   switch (mode) {
   case OpenMode::read_only:
     return SQLITE_OPEN_READONLY | common;
@@ -568,6 +778,29 @@ void configure_database(sqlite3* database) {
     return SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | common;
   }
   return SQLITE_OPEN_READONLY | common;
+}
+
+void validate_database_path(const std::filesystem::path& path) {
+  const auto locator = path.string();
+  if (locator.empty()) {
+    throw Error{ErrorCode::database, "SQLite target path must not be empty"};
+  }
+  if (locator == ":memory:" || locator.starts_with("file:") ||
+      locator.find_first_of("?#") != std::string::npos || locator.find('\0') != std::string::npos) {
+    throw Error{ErrorCode::database, "SQLite target must be a plain persistent filesystem path"};
+  }
+
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(path, error);
+  if (error && error != std::errc::no_such_file_or_directory) {
+    throw Error{ErrorCode::database, "cannot inspect SQLite target path: " + error.message()};
+  }
+  if (!error && std::filesystem::is_symlink(status)) {
+    throw Error{ErrorCode::database, "SQLite target must not be a symbolic link"};
+  }
+  if (!error && std::filesystem::exists(status) && !std::filesystem::is_regular_file(status)) {
+    throw Error{ErrorCode::database, "SQLite target must be a regular file"};
+  }
 }
 
 [[nodiscard]] std::string optional_key(const std::optional<std::string>& value) {
@@ -791,6 +1024,13 @@ void hash_optional_sql(Sha256& hash, const std::string_view name,
   }
 
   const auto definitions = schema_sql(database);
+  for (const auto& [identity, definition] : definitions) {
+    static_cast<void>(definition);
+    const auto& [type, name] = identity;
+    if (is_dbdiff_reserved_name(name) && !(type == "table" && is_history_table(name))) {
+      throw_unsupported("unrecognized reserved SQLite schema object: " + name);
+    }
+  }
   SchemaSnapshot snapshot;
   Statement tables{database, "SELECT name,type,wr,strict FROM pragma_table_list "
                              "WHERE schema='main' ORDER BY name COLLATE BINARY;"};
@@ -1605,13 +1845,17 @@ void validate_source_statements(const std::string_view sql,
                                 const std::vector<StatementSpan>& statements) {
   for (const auto& statement : statements) {
     const auto text = sql.substr(statement.begin, statement.end - statement.begin);
+    if (references_reserved_metadata(text)) {
+      throw Error{ErrorCode::source,
+                  "SQLite declarative sources may not reference reserved _dbdiff_ objects"};
+    }
     if (statement.kind != StatementKind::ddl) {
       throw Error{ErrorCode::source,
                   "SQLite declarative sources may contain only persistent schema DDL"};
     }
-    if (is_unsupported_create(text)) {
+    if (is_unsupported_create(text) || ddl_targets_unsupported_schema(text)) {
       throw Error{ErrorCode::source,
-                  "temporary and virtual SQLite objects are not supported in sources"};
+                  "temporary, attached, and virtual SQLite objects are not supported in sources"};
     }
     if (is_create_table_as_select(text)) {
       throw Error{ErrorCode::source, "CREATE TABLE AS SELECT is not declarative schema DDL"};
@@ -1624,6 +1868,9 @@ void validate_migration_statements(const std::string_view sql,
   bool in_transaction = false;
   for (const auto& statement : statements) {
     const auto text = sql.substr(statement.begin, statement.end - statement.begin);
+    if (references_reserved_metadata(text)) {
+      throw_migration("SQLite migrations may not reference reserved _dbdiff_ objects");
+    }
     switch (statement.kind) {
     case StatementKind::begin:
       if (in_transaction) {
@@ -1652,8 +1899,11 @@ void validate_migration_statements(const std::string_view sql,
       }
       break;
     case StatementKind::ddl:
-      if (is_unsupported_create(text)) {
-        throw_migration("temporary and virtual SQLite objects are not supported");
+      if (is_unsupported_create(text) || ddl_targets_unsupported_schema(text)) {
+        throw_migration("temporary, attached, and virtual SQLite objects are not supported");
+      }
+      if (is_create_table_as_select(text)) {
+        throw_migration("CREATE TABLE AS SELECT is not safe migration DDL");
       }
       break;
     case StatementKind::session: {
@@ -1706,6 +1956,334 @@ void rollback_noexcept(sqlite3* database) noexcept {
 void restore_foreign_keys_noexcept(sqlite3* database, const int enabled) noexcept {
   rollback_noexcept(database);
   execute_cleanup(database, enabled != 0 ? "PRAGMA foreign_keys=ON;" : "PRAGMA foreign_keys=OFF;");
+}
+
+[[noreturn]] void throw_history_corruption(const std::string& message) {
+  throw Error{ErrorCode::database, "invalid dbdiff SQLite migration history: " + message};
+}
+
+[[nodiscard]] bool is_lower_sha256(const std::string_view value) {
+  return value.size() == 64U &&
+         value.find_first_not_of("0123456789abcdef") == std::string_view::npos;
+}
+
+[[nodiscard]] std::size_t checked_ordinal(const sqlite3_int64 value) {
+  if (value < 0 || static_cast<unsigned long long>(value) >
+                       static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+    throw_history_corruption("unit or revision ordinal is out of range");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+[[nodiscard]] bool history_storage_exists(sqlite3* database) {
+  const auto count = query_integer(
+      database, "SELECT count(*) FROM main.sqlite_schema "
+                "WHERE lower(name) IN "
+                "('_dbdiff_migrations','_dbdiff_migration_revisions','_dbdiff_migration_units');");
+  if (count == 0) {
+    return false;
+  }
+  if (count != 3) {
+    throw_history_corruption("metadata tables are incomplete");
+  }
+  return true;
+}
+
+template <typename Function> void internal_transaction(sqlite3* database, Function&& function) {
+  if (sqlite3_get_autocommit(database) == 0) {
+    throw_history_corruption("an internal transaction was requested inside an active transaction");
+  }
+  execute_one(database, "BEGIN IMMEDIATE;");
+  try {
+    function();
+    execute_one(database, "COMMIT;");
+  } catch (...) {
+    rollback_noexcept(database);
+    throw;
+  }
+}
+
+void ensure_history_storage(sqlite3* database) {
+  internal_transaction(database, [database] {
+    if (history_storage_exists(database)) {
+      return;
+    }
+    execute_one(database, "CREATE TABLE main.\"_dbdiff_migrations\"("
+                          "version TEXT PRIMARY KEY,"
+                          "backend TEXT NOT NULL CHECK(backend='sqlite'),"
+                          "engine_version TEXT NOT NULL,"
+                          "attempted_file_sha256 TEXT NOT NULL,"
+                          "completed_file_sha256 TEXT"
+                          ") STRICT;");
+    execute_one(database, "CREATE TABLE main.\"_dbdiff_migration_revisions\"("
+                          "version TEXT NOT NULL,"
+                          "revision_ordinal INTEGER NOT NULL CHECK(revision_ordinal>=0),"
+                          "exact_file_sha256 TEXT NOT NULL,"
+                          "exact_sql BLOB NOT NULL,"
+                          "PRIMARY KEY(version,revision_ordinal),"
+                          "UNIQUE(version,exact_file_sha256),"
+                          "FOREIGN KEY(version) REFERENCES \"_dbdiff_migrations\"(version) "
+                          "ON DELETE RESTRICT"
+                          ") STRICT;");
+    execute_one(database, "CREATE TABLE main.\"_dbdiff_migration_units\"("
+                          "version TEXT NOT NULL,"
+                          "ordinal INTEGER NOT NULL CHECK(ordinal>=0),"
+                          "exact_sha256 TEXT NOT NULL,"
+                          "explicit_transaction INTEGER NOT NULL "
+                          "CHECK(explicit_transaction IN (0,1)),"
+                          "before_schema_sha256 TEXT NOT NULL,"
+                          "after_schema_sha256 TEXT NOT NULL,"
+                          "completed_revision_sha256 TEXT NOT NULL,"
+                          "state TEXT NOT NULL CHECK(state IN ('started','completed')),"
+                          "PRIMARY KEY(version,ordinal),"
+                          "FOREIGN KEY(version) REFERENCES \"_dbdiff_migrations\"(version) "
+                          "ON DELETE RESTRICT"
+                          ") STRICT;");
+  });
+}
+
+[[nodiscard]] MigrationHistory read_history_database(sqlite3* database) {
+  if (!history_storage_exists(database)) {
+    return {};
+  }
+
+  MigrationHistory history;
+  history.initialized = true;
+  Statement migrations{
+      database, "SELECT version,backend,engine_version,attempted_file_sha256,completed_file_sha256 "
+                "FROM main.\"_dbdiff_migrations\" ORDER BY version COLLATE BINARY;"};
+  while (migrations.step() == SQLITE_ROW) {
+    MigrationHistoryEntry entry;
+    entry.version = migrations.text(0);
+    entry.backend = migrations.text(1);
+    entry.engine_version = migrations.text(2);
+    entry.attempted_file_sha256 = migrations.text(3);
+    entry.completed_file_sha256 = migrations.optional_text(4);
+    if (entry.version.empty() || entry.backend != "sqlite" || entry.engine_version.empty() ||
+        !is_lower_sha256(entry.attempted_file_sha256) ||
+        (entry.completed_file_sha256.has_value() &&
+         !is_lower_sha256(*entry.completed_file_sha256))) {
+      throw_history_corruption("migration row contains invalid values");
+    }
+
+    Statement units{database,
+                    "SELECT ordinal,exact_sha256,explicit_transaction,before_schema_sha256,"
+                    "after_schema_sha256,state FROM main.\"_dbdiff_migration_units\" "
+                    "WHERE version=?1 ORDER BY ordinal;"};
+    units.bind_text(1, entry.version);
+    bool saw_started = false;
+    while (units.step() == SQLITE_ROW) {
+      MigrationUnitRecord unit;
+      unit.ordinal = checked_ordinal(units.integer64(0));
+      unit.exact_sha256 = units.text(1);
+      const auto explicit_transaction = units.integer(2);
+      unit.explicit_transaction = explicit_transaction != 0;
+      unit.before_schema_sha256 = units.text(3);
+      unit.after_schema_sha256 = units.text(4);
+      const auto state = units.text(5);
+      if (unit.ordinal != entry.units.size() ||
+          (explicit_transaction != 0 && explicit_transaction != 1) ||
+          !is_lower_sha256(unit.exact_sha256) || !is_lower_sha256(unit.before_schema_sha256) ||
+          !is_lower_sha256(unit.after_schema_sha256)) {
+        throw_history_corruption("migration unit row contains invalid values");
+      }
+      if (state == "started") {
+        if (saw_started) {
+          throw_history_corruption("migration contains multiple started units");
+        }
+        saw_started = true;
+        unit.state = MigrationUnitState::started;
+      } else if (state == "completed") {
+        if (saw_started) {
+          throw_history_corruption("a completed unit follows a started unit");
+        }
+        unit.state = MigrationUnitState::completed;
+      } else {
+        throw_history_corruption("migration unit has an unknown state");
+      }
+      entry.units.push_back(std::move(unit));
+    }
+    if (entry.completed_file_sha256.has_value() && saw_started) {
+      throw_history_corruption("a completed migration contains a started unit");
+    }
+    history.entries.push_back(std::move(entry));
+  }
+
+  Statement revisions{database, "SELECT version,revision_ordinal,exact_file_sha256,exact_sql "
+                                "FROM main.\"_dbdiff_migration_revisions\" WHERE 0;"};
+  if (revisions.step() != SQLITE_DONE) {
+    throw_history_corruption("revision metadata validation returned rows");
+  }
+  return history;
+}
+
+void require_history_inputs(const std::string_view version,
+                            const std::string_view exact_file_sha256, const std::string_view sql) {
+  if (version.empty() || version.size() > 512U || version.find('\0') != std::string_view::npos) {
+    throw_migration("migration version must be a non-empty value without NUL bytes");
+  }
+  if (!is_lower_sha256(exact_file_sha256)) {
+    throw_migration("migration file checksum must be a lowercase SHA-256 digest");
+  }
+  if (sha256_hex(sql) != exact_file_sha256) {
+    throw_migration("migration file checksum does not match its exact SQL bytes");
+  }
+}
+
+void record_attempt(sqlite3* database, const std::string_view version,
+                    const std::string_view exact_file_sha256, const std::string_view sql,
+                    const bool existing) {
+  internal_transaction(database, [&] {
+    if (existing) {
+      Statement update{database, "UPDATE main.\"_dbdiff_migrations\" "
+                                 "SET engine_version=?2,attempted_file_sha256=?3 "
+                                 "WHERE version=?1 AND completed_file_sha256 IS NULL;"};
+      update.bind_text(1, version);
+      update.bind_text(2, sqlite3_libversion());
+      update.bind_text(3, exact_file_sha256);
+      if (update.step() != SQLITE_DONE || sqlite3_changes(database) != 1) {
+        throw_history_corruption("could not update the incomplete migration attempt");
+      }
+    } else {
+      Statement insert{database, "INSERT INTO main.\"_dbdiff_migrations\"("
+                                 "version,backend,engine_version,attempted_file_sha256) "
+                                 "VALUES(?1,'sqlite',?2,?3);"};
+      insert.bind_text(1, version);
+      insert.bind_text(2, sqlite3_libversion());
+      insert.bind_text(3, exact_file_sha256);
+      if (insert.step() != SQLITE_DONE) {
+        throw_history_corruption("could not insert the migration attempt");
+      }
+    }
+
+    Statement revision{database,
+                       "INSERT INTO main.\"_dbdiff_migration_revisions\"("
+                       "version,revision_ordinal,exact_file_sha256,exact_sql) "
+                       "SELECT ?1,COALESCE((SELECT max(revision_ordinal)+1 "
+                       "FROM main.\"_dbdiff_migration_revisions\" WHERE version=?1),0),?2,?3 "
+                       "WHERE NOT EXISTS(SELECT 1 FROM main.\"_dbdiff_migration_revisions\" "
+                       "WHERE version=?1 AND exact_file_sha256=?2);"};
+    revision.bind_text(1, version);
+    revision.bind_text(2, exact_file_sha256);
+    revision.bind_blob(3, sql);
+    if (revision.step() != SQLITE_DONE) {
+      throw_history_corruption("could not store the exact migration revision");
+    }
+  });
+}
+
+void insert_unit_record(sqlite3* database, const std::string_view version,
+                        const MigrationUnitRecord& unit,
+                        const std::string_view completed_revision_sha256) {
+  Statement insert{database,
+                   "INSERT INTO main.\"_dbdiff_migration_units\"("
+                   "version,ordinal,exact_sha256,explicit_transaction,before_schema_sha256,"
+                   "after_schema_sha256,completed_revision_sha256,state) "
+                   "VALUES(?1,?2,?3,?4,?5,?6,?7,?8);"};
+  insert.bind_text(1, version);
+  insert.bind_integer(2, static_cast<sqlite3_int64>(unit.ordinal));
+  insert.bind_text(3, unit.exact_sha256);
+  insert.bind_integer(4, unit.explicit_transaction ? 1 : 0);
+  insert.bind_text(5, unit.before_schema_sha256);
+  insert.bind_text(6, unit.after_schema_sha256);
+  insert.bind_text(7, completed_revision_sha256);
+  insert.bind_text(8, unit.state == MigrationUnitState::completed ? "completed" : "started");
+  if (insert.step() != SQLITE_DONE) {
+    throw_history_corruption("could not record a migration unit");
+  }
+}
+
+void insert_unit_record_atomic(sqlite3* database, const std::string_view version,
+                               const MigrationUnitRecord& unit,
+                               const std::string_view completed_revision_sha256) {
+  internal_transaction(
+      database, [&] { insert_unit_record(database, version, unit, completed_revision_sha256); });
+}
+
+void complete_started_unit(sqlite3* database, const std::string_view version,
+                           const std::size_t ordinal) {
+  internal_transaction(database, [&] {
+    Statement update{database, "UPDATE main.\"_dbdiff_migration_units\" SET state='completed' "
+                               "WHERE version=?1 AND ordinal=?2 AND state='started';"};
+    update.bind_text(1, version);
+    update.bind_integer(2, static_cast<sqlite3_int64>(ordinal));
+    if (update.step() != SQLITE_DONE || sqlite3_changes(database) != 1) {
+      throw_history_corruption("could not complete a started migration unit");
+    }
+  });
+}
+
+void remove_started_unit(sqlite3* database, const std::string_view version,
+                         const std::size_t ordinal) {
+  internal_transaction(database, [&] {
+    Statement remove{database, "DELETE FROM main.\"_dbdiff_migration_units\" "
+                               "WHERE version=?1 AND ordinal=?2 AND state='started';"};
+    remove.bind_text(1, version);
+    remove.bind_integer(2, static_cast<sqlite3_int64>(ordinal));
+    if (remove.step() != SQLITE_DONE || sqlite3_changes(database) != 1) {
+      throw_history_corruption("could not discard a non-applied standalone unit");
+    }
+  });
+}
+
+void complete_migration(sqlite3* database, const std::string_view version,
+                        const std::string_view exact_file_sha256) {
+  internal_transaction(database, [&] {
+    Statement update{database, "UPDATE main.\"_dbdiff_migrations\" SET completed_file_sha256=?2 "
+                               "WHERE version=?1 AND completed_file_sha256 IS NULL;"};
+    update.bind_text(1, version);
+    update.bind_text(2, exact_file_sha256);
+    if (update.step() != SQLITE_DONE || sqlite3_changes(database) != 1) {
+      throw_history_corruption("could not mark the migration complete");
+    }
+  });
+}
+
+[[nodiscard]] bool is_replayable_session_unit(const ExecutionUnit& unit) {
+  return !unit.explicit_transaction && unit.statements.size() == 1U &&
+         unit.statements.front().kind == StatementKind::session;
+}
+
+void execute_unit_plain(sqlite3* database, const ParsedScript& parsed, const ExecutionUnit& unit) {
+  for (const auto& statement : unit.statements) {
+    const auto text =
+        std::string_view{parsed.sql}.substr(statement.begin, statement.end - statement.begin);
+    execute_one(database, text,
+                statement.kind == StatementKind::session &&
+                    pragma_name(text) == "foreign_key_check");
+  }
+}
+
+void copy_database(sqlite3* source, sqlite3* destination) {
+  auto* backup = sqlite3_backup_init(destination, "main", source, "main");
+  if (backup == nullptr) {
+    throw_sqlite(destination, sqlite3_errcode(destination), "creating SQLite backup");
+  }
+
+  constexpr int pages_per_step = 128;
+  constexpr int maximum_busy_retries = 500;
+  int busy_retries = 0;
+  int step_result = SQLITE_OK;
+  while (step_result == SQLITE_OK || step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED) {
+    if (step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED) {
+      if (++busy_retries > maximum_busy_retries) {
+        break;
+      }
+      static_cast<void>(sqlite3_sleep(10));
+    }
+    step_result = sqlite3_backup_step(backup, pages_per_step);
+  }
+  const auto step_error =
+      step_result == SQLITE_DONE
+          ? std::string{}
+          : sqlite_error_message(destination, step_result, "copying SQLite database");
+  const auto finish_result = sqlite3_backup_finish(backup);
+  if (step_result != SQLITE_DONE) {
+    throw Error{ErrorCode::database, step_error};
+  }
+  if (finish_result != SQLITE_OK) {
+    throw_sqlite(destination, finish_result, "finishing SQLite backup");
+  }
 }
 
 } // namespace
@@ -1784,9 +2362,7 @@ Database Database::temporary() {
 }
 
 Database Database::open(const std::filesystem::path& path, const OpenMode mode) {
-  if (path.empty()) {
-    throw Error{ErrorCode::database, "SQLite target path must not be empty"};
-  }
+  validate_database_path(path);
   return Database{std::make_unique<Impl>(path.string(), mode)};
 }
 
@@ -1831,6 +2407,243 @@ void Database::execute_migration(const std::string_view sql) {
     restore_foreign_keys_noexcept(implementation_->handle, foreign_keys);
     throw;
   }
+}
+
+void Database::execute_prefix(const std::string_view sql, const std::size_t completed_unit_count) {
+  auto statements = scan_statements(sql);
+  validate_migration_statements(sql, statements);
+  auto parsed = build_execution_units(std::string{sql}, std::move(statements));
+  if (completed_unit_count > parsed.units.size()) {
+    throw_migration("SQLite migration prefix contains more units than the script");
+  }
+  const auto foreign_keys = query_integer(implementation_->handle, "PRAGMA foreign_keys;");
+  try {
+    for (std::size_t index = 0; index < completed_unit_count; ++index) {
+      execute_unit_plain(implementation_->handle, parsed, parsed.units[index]);
+    }
+    if (sqlite3_get_autocommit(implementation_->handle) == 0) {
+      throw_migration("SQLite migration prefix left the connection inside a transaction");
+    }
+    restore_foreign_keys(implementation_->handle, foreign_keys);
+    static_cast<void>(inspect_database(implementation_->handle));
+  } catch (...) {
+    restore_foreign_keys_noexcept(implementation_->handle, foreign_keys);
+    throw;
+  }
+}
+
+void Database::backup_to(Database& destination) const {
+  if (implementation_.get() == destination.implementation_.get()) {
+    throw Error{ErrorCode::database, "SQLite backup source and destination must be different"};
+  }
+  if (sqlite3_get_autocommit(implementation_->handle) == 0 ||
+      sqlite3_get_autocommit(destination.implementation_->handle) == 0) {
+    throw Error{ErrorCode::database,
+                "SQLite online backup requires idle source and destination connections"};
+  }
+  static_cast<void>(inspect_database(implementation_->handle));
+  copy_database(implementation_->handle, destination.implementation_->handle);
+  static_cast<void>(inspect_database(destination.implementation_->handle));
+}
+
+MigrationHistory Database::read_history() const {
+  return read_history_database(implementation_->handle);
+}
+
+std::vector<MigrationRevision> Database::recover_revisions(const std::string_view version) const {
+  if (!history_storage_exists(implementation_->handle)) {
+    return {};
+  }
+  Statement revisions{implementation_->handle,
+                      "SELECT revision_ordinal,exact_file_sha256,exact_sql "
+                      "FROM main.\"_dbdiff_migration_revisions\" "
+                      "WHERE version=?1 ORDER BY revision_ordinal;"};
+  revisions.bind_text(1, version);
+  std::vector<MigrationRevision> result;
+  while (revisions.step() == SQLITE_ROW) {
+    MigrationRevision revision;
+    revision.ordinal = checked_ordinal(revisions.integer64(0));
+    revision.exact_file_sha256 = revisions.text(1);
+    revision.sql = revisions.blob(2);
+    if (revision.ordinal != result.size() || !is_lower_sha256(revision.exact_file_sha256) ||
+        sha256_hex(revision.sql) != revision.exact_file_sha256) {
+      throw_history_corruption("stored migration revision is corrupt");
+    }
+    result.push_back(std::move(revision));
+  }
+  return result;
+}
+
+MigrationApplyResult Database::apply_version(const std::string_view version,
+                                             const std::string_view exact_file_sha256,
+                                             const std::string_view sql, const bool resume) {
+  require_history_inputs(version, exact_file_sha256, sql);
+  auto statements = scan_statements(sql);
+  validate_migration_statements(sql, statements);
+  auto parsed = build_execution_units(std::string{sql}, std::move(statements));
+  if (sqlite3_get_autocommit(implementation_->handle) == 0) {
+    throw_migration("cannot apply a SQLite migration inside an active transaction");
+  }
+
+  ensure_history_storage(implementation_->handle);
+  auto history = read_history_database(implementation_->handle);
+  auto found = std::ranges::find(history.entries, version, &MigrationHistoryEntry::version);
+  const auto existing = found != history.entries.end();
+  if (existing && found->completed_file_sha256.has_value()) {
+    if (found->attempted_file_sha256 != *found->completed_file_sha256) {
+      throw_history_corruption("completed migration checksum does not match its last attempt");
+    }
+    if (*found->completed_file_sha256 != exact_file_sha256) {
+      throw_migration("completed migration '" + std::string{version} +
+                      "' has different exact SQL bytes");
+    }
+    return MigrationApplyResult{true, found->units.size(), *found->completed_file_sha256};
+  }
+  if (existing && !resume) {
+    throw_migration("migration '" + std::string{version} +
+                    "' is incomplete; explicit resume is required");
+  }
+  if (!existing && resume) {
+    throw_migration("migration '" + std::string{version} + "' has no incomplete attempt to resume");
+  }
+
+  record_attempt(implementation_->handle, version, exact_file_sha256, parsed.sql, existing);
+  history = read_history_database(implementation_->handle);
+  found = std::ranges::find(history.entries, version, &MigrationHistoryEntry::version);
+  if (found == history.entries.end() || found->completed_file_sha256.has_value()) {
+    throw_history_corruption("attempted migration row could not be read back");
+  }
+
+  if (!found->units.empty() && found->units.back().state == MigrationUnitState::started) {
+    const auto started = found->units.back();
+    if (started.explicit_transaction) {
+      throw_history_corruption("an explicit transaction unit is only partially recorded");
+    }
+    const auto current_schema_sha256 = inspect_database(implementation_->handle).semantic_hash;
+    if (started.before_schema_sha256 == started.after_schema_sha256) {
+      throw_migration("cannot safely reconcile standalone migration unit " +
+                      std::to_string(started.ordinal + 1U) +
+                      " because its before and after schemas are indistinguishable");
+    }
+    if (current_schema_sha256 == started.after_schema_sha256) {
+      if (started.ordinal >= parsed.units.size() ||
+          parsed.units[started.ordinal].exact_sha256 != started.exact_sha256) {
+        throw_migration("cannot safely resume an edited standalone migration unit that may "
+                        "already be applied");
+      }
+      complete_started_unit(implementation_->handle, version, started.ordinal);
+    } else if (current_schema_sha256 == started.before_schema_sha256) {
+      remove_started_unit(implementation_->handle, version, started.ordinal);
+    } else {
+      throw_migration("cannot safely reconcile standalone migration unit " +
+                      std::to_string(started.ordinal + 1U) +
+                      "; the schema matches neither its before nor after checkpoint");
+    }
+    history = read_history_database(implementation_->handle);
+    found = std::ranges::find(history.entries, version, &MigrationHistoryEntry::version);
+    if (found == history.entries.end()) {
+      throw_history_corruption("migration disappeared while reconciling its last unit");
+    }
+  }
+
+  std::vector<std::string> completed_hashes;
+  completed_hashes.reserve(found->units.size());
+  for (const auto& unit : found->units) {
+    if (unit.state != MigrationUnitState::completed) {
+      throw_history_corruption("a started unit remained after reconciliation");
+    }
+    completed_hashes.push_back(unit.exact_sha256);
+  }
+  validate_completed_prefix(completed_hashes, parsed);
+  for (std::size_t index = 0; index < found->units.size(); ++index) {
+    if (found->units[index].explicit_transaction != parsed.units[index].explicit_transaction) {
+      throw_history_corruption("stored unit transaction shape differs from its exact SQL");
+    }
+  }
+
+  const auto completed_unit_count = found->units.size();
+  const auto foreign_keys = query_integer(implementation_->handle, "PRAGMA foreign_keys;");
+  try {
+    for (std::size_t index = 0; index < completed_unit_count; ++index) {
+      if (is_replayable_session_unit(parsed.units[index])) {
+        execute_unit_plain(implementation_->handle, parsed, parsed.units[index]);
+      }
+    }
+
+    for (std::size_t index = completed_unit_count; index < parsed.units.size(); ++index) {
+      const auto& execution_unit = parsed.units[index];
+      const auto before_schema_sha256 = inspect_database(implementation_->handle).semantic_hash;
+
+      if (is_replayable_session_unit(execution_unit)) {
+        execute_unit_plain(implementation_->handle, parsed, execution_unit);
+        const auto after_schema_sha256 = inspect_database(implementation_->handle).semantic_hash;
+        if (before_schema_sha256 != after_schema_sha256) {
+          throw_migration("SQLite session directive unexpectedly changed the persistent schema");
+        }
+        insert_unit_record_atomic(implementation_->handle, version,
+                                  MigrationUnitRecord{index, execution_unit.exact_sha256, false,
+                                                      before_schema_sha256, after_schema_sha256,
+                                                      MigrationUnitState::completed},
+                                  exact_file_sha256);
+        continue;
+      }
+
+      if (execution_unit.explicit_transaction) {
+        bool checkpointed = false;
+        for (const auto& statement : execution_unit.statements) {
+          const auto text =
+              std::string_view{parsed.sql}.substr(statement.begin, statement.end - statement.begin);
+          if (statement.kind == StatementKind::commit) {
+            const auto after_schema_sha256 =
+                inspect_database(implementation_->handle).semantic_hash;
+            insert_unit_record(implementation_->handle, version,
+                               MigrationUnitRecord{index, execution_unit.exact_sha256, true,
+                                                   before_schema_sha256, after_schema_sha256,
+                                                   MigrationUnitState::completed},
+                               exact_file_sha256);
+            execute_one(implementation_->handle, text);
+            checkpointed = true;
+          } else {
+            execute_one(implementation_->handle, text,
+                        statement.kind == StatementKind::session &&
+                            pragma_name(text) == "foreign_key_check");
+          }
+        }
+        if (!checkpointed || sqlite3_get_autocommit(implementation_->handle) == 0) {
+          throw_migration("SQLite explicit transaction unit did not commit cleanly");
+        }
+        continue;
+      }
+
+      auto clone = Database::temporary();
+      copy_database(implementation_->handle, clone.implementation_->handle);
+      const auto unit_foreign_keys = query_integer(implementation_->handle, "PRAGMA foreign_keys;");
+      execute_one(clone.implementation_->handle,
+                  unit_foreign_keys != 0 ? "PRAGMA foreign_keys=ON;" : "PRAGMA foreign_keys=OFF;");
+      execute_unit_plain(clone.implementation_->handle, parsed, execution_unit);
+      const auto expected_after_schema_sha256 = clone.inspect().semantic_hash;
+      insert_unit_record_atomic(
+          implementation_->handle, version,
+          MigrationUnitRecord{index, execution_unit.exact_sha256, false, before_schema_sha256,
+                              expected_after_schema_sha256, MigrationUnitState::started},
+          exact_file_sha256);
+      execute_unit_plain(implementation_->handle, parsed, execution_unit);
+      const auto actual_after_schema_sha256 =
+          inspect_database(implementation_->handle).semantic_hash;
+      if (actual_after_schema_sha256 != expected_after_schema_sha256) {
+        throw_migration("standalone SQLite DDL produced a schema different from its preflight");
+      }
+      complete_started_unit(implementation_->handle, version, index);
+    }
+
+    restore_foreign_keys(implementation_->handle, foreign_keys);
+    static_cast<void>(inspect_database(implementation_->handle));
+    complete_migration(implementation_->handle, version, exact_file_sha256);
+  } catch (...) {
+    restore_foreign_keys_noexcept(implementation_->handle, foreign_keys);
+    throw;
+  }
+  return MigrationApplyResult{false, parsed.units.size(), std::string{exact_file_sha256}};
 }
 
 SchemaSnapshot Database::inspect() const { return inspect_database(implementation_->handle); }
