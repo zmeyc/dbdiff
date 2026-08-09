@@ -1,0 +1,138 @@
+requirement_id	kind	name
+CLI-001	unit	CLI help and version return success
+CLI-001	unit	CLI discovers configuration and validates hazards
+CLI-002	unit	CLI reports missing configuration as an operational failure
+CLI-002	integration	dbdiff_cli_lifecycle_integration
+CFG-001	unit	strict YAML configuration resolves paths and defaults
+CFG-001	unit	configuration rejects unknown, ambiguous, and advanced YAML
+CFG-001	unit	configuration discovery stops at the nearest Git root
+CFG-001	unit	configuration discovery walks upward without a Git repository
+CFG-002	unit	CLI discovers configuration and validates hazards
+CFG-002	unit	locator inference, environment resolution, and redaction are deterministic
+CFG-003	unit	PostgreSQL locator parsing is deterministic and redacts credentials
+CFG-003	unit	PostgreSQL locator errors never repeat the supplied secret
+CFG-003	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
+CFG-004	unit	explicit alternative configurations keep independent migration streams
+SRC-001	unit	directory sources are recursively resolved in lexical order
+SRC-002	unit	root and nested manifests define exact source order
+SRC-002	manual	002_sqlite_multifile_manifest
+SRC-003	unit	source resolver rejects unsafe and ambiguous inputs
+SRC-003	unit	UTF-8 validation rejects malformed and overlong encodings
+SRC-004	unit	source fingerprints include order, path, and exact bytes
+SRC-004	unit	SQLite semantic hashes ignore schema formatting and identifier quoting
+SRC-004	unit	PostgreSQL semantic hashes are normalized and version-patch independent
+SRC-005	unit	SQLite declarative source execution rejects non-schema behavior
+SRC-005	unit	PostgreSQL scanner rejects data-bearing sources and server-wide migrations
+CRE-001	unit	create reconstructs fresh databases without resolving the live target
+CRE-001	integration	dbdiff_cli_lifecycle_integration
+CRE-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+CRE-001	manual	001_sqlite_initial
+CRE-002	unit	create reconstructs fresh databases without resolving the live target
+CRE-002	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+CRE-002	manual	010_postgresql_initial
+CRE-003	unit	create reconstructs fresh databases without resolving the live target
+CRE-003	unit	migration save is atomic and never overwrites
+CRE-004	unit	create reconstructs fresh databases without resolving the live target
+CRE-004	integration	dbdiff_cli_lifecycle_integration
+CRE-005	unit	draft migrations retain editable SQL but block reconstruction and apply
+PLN-001	unit	operation ordering is topological and deterministic
+PLN-001	unit	operation ordering rejects invalid dependency graphs
+PLN-002	unit	PostgreSQL planner drafts ambiguous and data-dependent changes
+PLN-003	unit	create requires every generated hazard before saving
+PLN-004	unit	draft migrations retain editable SQL but block reconstruction and apply
+PLN-004	unit	SQLite planner marks unknown required-column mappings as drafts
+PLN-004	unit	PostgreSQL planner drafts ambiguous and data-dependent changes
+SQL-001	unit	PostgreSQL scanner preserves dollar quoted bodies and exact boundaries
+SQL-001	unit	PostgreSQL scanner rejects malformed and non-resumable scripts
+SQL-001	unit	PostgreSQL SQL quoting handles identifiers, literals, and control bytes
+SQL-002	unit	SQLite statement scanning preserves trigger bodies and transaction boundaries
+SQL-003	unit	execution units preserve visible transaction boundaries
+SQL-003	unit	execution units reject ambiguous transaction control
+SQL-003	unit	standalone DML and overlapping statement spans are rejected
+MIG-001	unit	migration metadata has a strict deterministic representation
+MIG-001	unit	migration metadata rejects malformed and incomplete headers
+MIG-001	unit	migration filenames are constrained and return their version
+MIG-001	unit	migrations load in filename order with exact checksums
+MIG-001	unit	migration save is atomic and never overwrites
+MIG-001	unit	create allocates monotonically ordered versions within one clock second
+MIG-002	unit	SQLite failed migrations preserve an immutable prefix and exact revisions
+MIG-002	unit	PostgreSQL uncertain standalone units fail closed
+MIG-003	unit	a completed execution prefix cannot be edited
+MIG-003	unit	SQLite standalone DDL can resume from an edited incomplete suffix
+MIG-003	unit	PostgreSQL completed unit bytes and boundaries are immutable
+MIG-004	unit	SQLite failed migrations preserve an immutable prefix and exact revisions
+MIG-004	unit	PostgreSQL history value objects retain exact recoverable revisions
+MIG-004	unit	SQLite apply, status, drift, and recover use only database-recorded history
+MIG-004	integration	dbdiff_cli_lifecycle_integration
+MIG-004	manual	005_sqlite_resume_recover
+MIG-005	unit	execution units preserve visible transaction boundaries
+MIG-005	unit	create reconstructs fresh databases without resolving the live target
+MIG-005	unit	PostgreSQL planner creates schemas and tables in dependency order
+MIG-005	integration	dbdiff_cli_lifecycle_integration
+MIG-005	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+APP-001	unit	SQLite apply, status, drift, and recover use only database-recorded history
+APP-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+APP-002	unit	SQLite apply, status, drift, and recover use only database-recorded history
+APP-002	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+APP-003	unit	SQLite apply, status, drift, and recover use only database-recorded history
+APP-003	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+APP-003	manual	004_sqlite_drift_isolation
+APP-005	unit	SQLite apply, status, drift, and recover use only database-recorded history
+APP-005	unit	SQLite data validation uses an online copy and never mutates the target on failure
+APP-005	integration	dbdiff_cli_lifecycle_integration
+APP-006	unit	SQLite apply, status, drift, and recover use only database-recorded history
+APP-006	unit	SQLite databases can be reopened read-only for inspection
+APP-006	integration	dbdiff_cli_lifecycle_integration
+SQT-001	unit	SQLite planner creates and drops complete schema object sets
+SQT-001	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-002	unit	SQLite planner appends columns without rebuilding a table
+SQT-003	unit	SQLite planner rebuilds tables deterministically and preserves rows and sequences
+SQT-003	unit	SQLite planner preserves accessible rowids and reports inaccessible ones
+SQT-003	manual	003_sqlite_rebuild_preserves_data
+SQT-004	unit	SQLite rejects unsafe schema scopes before committed work can escape
+SQT-004	unit	SQLite rejects virtual and unrecognized reserved target objects
+SQT-004	unit	SQLite opens only plain persistent non-symlink paths
+SQT-005	unit	SQLite busy handling serializes rollback-journal and WAL writers
+SQT-006	unit	SQLite data validation uses an online copy and never mutates the target on failure
+SQT-010	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-011	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-012	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-013	unit	SQLite planner rebuilds tables deterministically and preserves rows and sequences
+SQT-013	unit	SQLite planner preserves accessible rowids and reports inaccessible ones
+SQT-014	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-014	unit	SQLite planner replaces changed indexes views and triggers
+SQT-015	unit	SQLite rich schemas survive semantic render and reconstruction
+SQT-015	unit	SQLite planner replaces changed indexes views and triggers
+PG-001	unit	PostgreSQL relational objects have deterministic semantic identities
+PG-002	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
+PG-002	unit	PostgreSQL planner replaces referenced keys around foreign keys
+PG-002	unit	PostgreSQL planner drops policies and indexes before dependent columns
+PG-002	unit	PostgreSQL 18 named not-null constraints are ordered around primary keys
+PG-004	unit	PostgreSQL scanner rejects data-bearing sources and server-wide migrations
+PG-004	unit	PostgreSQL snapshot normalization rejects ambiguous catalog state
+PG-005	unit	PostgreSQL server versions 15 through 18 are accepted
+PG-005	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-010	unit	PostgreSQL snapshots normalize without retaining catalog OIDs
+PG-010	unit	PostgreSQL planner creates schemas and tables in dependency order
+PG-010	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-013	unit	PostgreSQL snapshots normalize without retaining catalog OIDs
+PG-013	unit	PostgreSQL planner creates schemas and tables in dependency order
+PG-013	unit	PostgreSQL planner handles supported column changes with hazards
+PG-014	unit	PostgreSQL relational objects have deterministic semantic identities
+PG-014	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
+PG-014	unit	PostgreSQL 18 named not-null constraints are ordered around primary keys
+PG-015	unit	PostgreSQL relational objects have deterministic semantic identities
+PG-015	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
+PG-020	unit	PostgreSQL relational objects have deterministic semantic identities
+PG-020	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
+SCR-001	unit	PostgreSQL scratch names and markers are safe value objects
+SCR-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+SCR-002	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
+SCR-002	unit	Docker PostgreSQL readiness retries without using a shell
+SCR-002	integration	integration.docker.Docker PostgreSQL scratch is reachable and explicitly removable
+SCR-004	unit	Docker PostgreSQL creation failure cleans only verified ownership
+SCR-004	unit	Docker PostgreSQL close refuses a mismatched ownership label
+SCR-004	unit	Docker PostgreSQL destructor performs verified best-effort cleanup
+SCR-004	integration	integration.docker.Docker PostgreSQL scratch is reachable and explicitly removable
+SCR-005	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
+OPS-001	integration	integration.docker.System process runner preserves argv boundaries and enforces timeout
