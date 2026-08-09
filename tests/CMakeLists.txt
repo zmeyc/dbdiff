@@ -4,6 +4,7 @@ add_executable(
   dbdiff_unit_tests
   test_config.cpp
   unit/test_docker.cpp
+  unit/test_core_gaps.cpp
   test_hash.cpp
   test_migration.cpp
   test_operation.cpp
