@@ -85,11 +85,15 @@ void validate_keys(const std::filesystem::path& file, const YAML::Node& node,
                    const std::set<std::string, std::less<>>& allowed,
                    const std::string_view context) {
   require_mapping(file, node, context);
+  std::set<std::string, std::less<>> seen;
   for (const auto& item : node) {
     if (!item.first.IsScalar()) {
       config_error(file, std::string{context} + " contains a non-scalar key");
     }
     const auto key = item.first.as<std::string>();
+    if (!seen.insert(key).second) {
+      config_error(file, std::string{context} + " contains duplicate key '" + key + "'");
+    }
     if (!allowed.contains(key)) {
       config_error(file, std::string{context} + " contains unknown key '" + key + "'");
     }
@@ -359,20 +363,12 @@ std::optional<std::filesystem::path> discover_config(const std::filesystem::path
     }
   }
 
-  if (!git_root) {
-    auto candidate = directory / "dbdiff.yaml";
-    if (std::filesystem::is_regular_file(candidate, error) && !error) {
-      return candidate;
-    }
-    return std::nullopt;
-  }
-
   for (auto candidate = directory;; candidate = candidate.parent_path()) {
     auto config = candidate / "dbdiff.yaml";
     if (std::filesystem::is_regular_file(config, error) && !error) {
       return config;
     }
-    if (candidate == *git_root) {
+    if ((git_root && candidate == *git_root) || candidate == candidate.root_path()) {
       break;
     }
   }

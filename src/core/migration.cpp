@@ -295,7 +295,31 @@ std::string validate_migration_filename(const std::filesystem::path& file) {
   if (!std::regex_match(name, match, valid)) {
     migration_error("migration filename must match YYYYMMDDHHMMSS_slug.sql");
   }
-  return match[1].str();
+  const auto version = match[1].str();
+  const auto timestamp = std::string_view{version}.substr(0, 14);
+  const auto parse_field = [&](const std::size_t offset, const std::size_t size) {
+    int value = 0;
+    const auto field = timestamp.substr(offset, size);
+    const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), value);
+    if (error != std::errc{} || end != field.data() + field.size()) {
+      migration_error("migration filename contains an invalid UTC timestamp");
+    }
+    return value;
+  };
+  const auto year_value = parse_field(0, 4);
+  const auto month_value = parse_field(4, 2);
+  const auto day_value = parse_field(6, 2);
+  const auto hour_value = parse_field(8, 2);
+  const auto minute_value = parse_field(10, 2);
+  const auto second_value = parse_field(12, 2);
+  const std::chrono::year_month_day date{std::chrono::year{year_value},
+                                         std::chrono::month{static_cast<unsigned>(month_value)},
+                                         std::chrono::day{static_cast<unsigned>(day_value)}};
+  if (year_value < 1 || year_value > 9999 || !date.ok() || hour_value > 23 || minute_value > 59 ||
+      second_value > 59) {
+    migration_error("migration filename contains an invalid UTC timestamp");
+  }
+  return version;
 }
 
 MigrationFile load_migration(const std::filesystem::path& file,

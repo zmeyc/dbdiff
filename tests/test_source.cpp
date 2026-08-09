@@ -77,9 +77,30 @@ TEST_CASE("source resolver rejects unsafe and ambiguous inputs", "[unit][SRC-003
     REQUIRE_FALSE(error);
     CHECK_THROWS_AS(resolver(temporary).resolve({"schema/link.sql"}), dbdiff::Error);
   }
+  SECTION("implicit manifest symbolic link") {
+    temporary.write("schema/manifest.sql", "a.sql\n");
+    std::error_code error;
+    std::filesystem::create_symlink(temporary.path() / "schema/manifest.sql",
+                                    temporary.path() / "schema/dbdiff.schema", error);
+    REQUIRE_FALSE(error);
+    CHECK_THROWS_AS(resolver(temporary).resolve({"schema"}), dbdiff::Error);
+  }
+  SECTION("symbolic parent outside the project") {
+    temporary.write("outside/a.sql", "SELECT 1;\n");
+    std::error_code error;
+    std::filesystem::create_directory_symlink(temporary.path() / "outside",
+                                              temporary.path() / "linked-parent", error);
+    REQUIRE_FALSE(error);
+    CHECK_THROWS_AS(resolver(temporary).resolve({temporary.path() / "linked-parent/a.sql"}),
+                    dbdiff::Error);
+  }
   SECTION("invalid UTF-8") {
     temporary.write("schema/invalid.sql", std::string{"\xc0\xaf", 2});
     CHECK_THROWS_AS(resolver(temporary).resolve({"schema/invalid.sql"}), dbdiff::Error);
+  }
+  SECTION("invalid UTF-8 manifest") {
+    temporary.write("schema/invalid.dbdiff-schema", std::string{"\xc0\xaf", 2});
+    CHECK_THROWS_AS(resolver(temporary).resolve({"schema/invalid.dbdiff-schema"}), dbdiff::Error);
   }
   SECTION("glob in manifest") {
     temporary.write("schema/glob.dbdiff-schema", "*.sql\n");

@@ -55,6 +55,10 @@ TEST_CASE("migration filenames are constrained and return their version", "[unit
   CHECK_THROWS_AS(dbdiff::validate_migration_filename("20260731120000_Create.sql"), dbdiff::Error);
   CHECK_THROWS_AS(dbdiff::validate_migration_filename("nested/20260731120000_create_users.sql"),
                   dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_migration_filename("20260230120000_bad_date.sql"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_migration_filename("20260731240000_bad_time.sql"),
+                  dbdiff::Error);
 }
 
 TEST_CASE("migrations load in filename order with exact checksums", "[unit][MIG-001]") {

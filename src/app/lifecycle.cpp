@@ -100,8 +100,6 @@ bool sqlite_target_exists(const std::filesystem::path& path) {
 std::string concatenate_sources(const SourceSet& sources) {
   std::string sql;
   for (const auto& source : sources.files) {
-    sql.append("\n-- source: ");
-    sql.append(source.display_path);
     sql.push_back('\n');
     sql.append(source.sql);
     if (!sql.ends_with('\n')) {
