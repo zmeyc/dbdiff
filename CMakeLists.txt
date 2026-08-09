@@ -24,7 +24,7 @@ if(DBDIFF_ENABLE_CLANG_TIDY)
 endif()
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx>=7.8)
+pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx>=7.7)
 pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq>=15)
 find_package(SQLite3 3.45 REQUIRED)
 find_package(CLI11 2.4 CONFIG REQUIRED)
@@ -72,8 +72,16 @@ target_link_libraries(dbdiff_postgresql PUBLIC dbdiff_core PkgConfig::PQXX
 dbdiff_set_warnings(dbdiff_postgresql)
 dbdiff_enable_sanitizers(dbdiff_postgresql)
 
+add_library(dbdiff_app STATIC src/app/cli.cpp src/app/lifecycle.cpp)
+add_library(dbdiff::app ALIAS dbdiff_app)
+target_include_directories(dbdiff_app PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+target_link_libraries(dbdiff_app PUBLIC dbdiff_core dbdiff_sqlite dbdiff_postgresql
+                                 PRIVATE CLI11::CLI11)
+dbdiff_set_warnings(dbdiff_app)
+dbdiff_enable_sanitizers(dbdiff_app)
+
 add_executable(dbdiff src/main.cpp)
-target_link_libraries(dbdiff PRIVATE dbdiff_sqlite dbdiff_postgresql CLI11::CLI11)
+target_link_libraries(dbdiff PRIVATE dbdiff_app)
 dbdiff_set_warnings(dbdiff)
 dbdiff_enable_sanitizers(dbdiff)
 

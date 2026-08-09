@@ -10,13 +10,16 @@ add_executable(
   test_script.cpp
   test_smoke.cpp
   test_source.cpp
+  unit/test_cli.cpp
+  unit/test_lifecycle.cpp
   unit/test_postgresql.cpp
+  unit/test_postgresql_history.cpp
   unit/test_postgresql_planner.cpp
   unit/test_sqlite.cpp
   unit/test_sqlite_hardening.cpp
   unit/test_sqlite_history.cpp
   unit/test_sqlite_planner.cpp)
-target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_postgresql dbdiff_sqlite
+target_link_libraries(dbdiff_unit_tests PRIVATE dbdiff_app
                                                 Catch2::Catch2WithMain)
 dbdiff_set_warnings(dbdiff_unit_tests)
 dbdiff_enable_sanitizers(dbdiff_unit_tests)
