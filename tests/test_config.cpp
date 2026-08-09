@@ -87,6 +87,12 @@ TEST_CASE("configuration rejects unknown, ambiguous, and advanced YAML", "[unit]
         "format: 1\nbackend: sqlite\nsources: [a.sql]\nmigrations: m\nlock_timeout: 5\n");
     CHECK_THROWS_AS(dbdiff::load_config(file), dbdiff::Error);
   }
+  SECTION("duplicate key") {
+    const auto file =
+        temporary.write("duplicate.yaml", "format: 1\nbackend: sqlite\nbackend: postgresql\n"
+                                          "sources: [a.sql]\nmigrations: m\n");
+    CHECK_THROWS_AS(dbdiff::load_config(file), dbdiff::Error);
+  }
 }
 
 TEST_CASE("configuration discovery stops at the nearest Git root", "[unit][CFG-001]") {
@@ -102,6 +108,15 @@ TEST_CASE("configuration discovery stops at the nearest Git root", "[unit][CFG-0
   std::filesystem::remove(temporary.path() / "repo/a/dbdiff.yaml");
   CHECK(dbdiff::discover_config(temporary.path() / "repo/a/b") ==
         temporary.path() / "repo/dbdiff.yaml");
+}
+
+TEST_CASE("configuration discovery walks upward without a Git repository", "[unit][CFG-001]") {
+  dbdiff::test::TempDirectory temporary;
+  std::filesystem::create_directories(temporary.path() / "plain/a/b");
+  temporary.write("plain/dbdiff.yaml", "nearest");
+
+  CHECK(dbdiff::discover_config(temporary.path() / "plain/a/b") ==
+        temporary.path() / "plain/dbdiff.yaml");
 }
 
 TEST_CASE("locator inference, environment resolution, and redaction are deterministic",

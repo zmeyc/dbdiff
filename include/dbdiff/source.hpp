@@ -30,6 +30,7 @@ public:
   [[nodiscard]] SourceSet resolve(const std::vector<std::filesystem::path>& entries) const;
 
 private:
+  std::filesystem::path input_base_directory_;
   std::filesystem::path base_directory_;
   std::filesystem::path migrations_directory_;
   StdinReader stdin_reader_;

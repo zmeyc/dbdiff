@@ -65,12 +65,13 @@ bool paths_overlap(const std::filesystem::path& first, const std::filesystem::pa
   return path_is_within(first, second) || path_is_within(second, first);
 }
 
-bool has_symlink_component(const std::filesystem::path& path, const std::filesystem::path& base) {
-  auto current = base;
-  auto relative = path.lexically_relative(base);
-  if (relative.empty() || (!relative.empty() && *relative.begin() == "..")) {
-    relative = path.filename();
-    current = path.parent_path();
+bool has_symlink_component(const std::filesystem::path& path,
+                           const std::filesystem::path& trusted_root) {
+  auto current = path.root_path();
+  auto relative = path.relative_path();
+  if (path_is_within(path, trusted_root)) {
+    current = trusted_root;
+    relative = path.lexically_relative(trusted_root);
   }
   for (const auto& component : relative) {
     current /= component;
@@ -138,9 +139,10 @@ std::string display_path(const std::filesystem::path& file, const std::filesyste
 
 class Resolution {
 public:
-  Resolution(std::filesystem::path base, std::filesystem::path migrations, StdinReader stdin_reader)
-      : base_{std::move(base)}, migrations_{std::move(migrations)},
-        stdin_reader_{std::move(stdin_reader)} {}
+  Resolution(std::filesystem::path input_base, std::filesystem::path base,
+             std::filesystem::path migrations, StdinReader stdin_reader)
+      : input_base_{std::move(input_base)}, base_{std::move(base)},
+        migrations_{std::move(migrations)}, stdin_reader_{std::move(stdin_reader)} {}
 
   SourceSet run(const std::vector<std::filesystem::path>& entries) {
     if (entries.empty()) {
@@ -168,7 +170,7 @@ public:
 
 private:
   void process(const std::filesystem::path& path) {
-    if (has_symlink_component(path, base_)) {
+    if (has_symlink_component(path, input_base_)) {
       source_error("symbolic links are not allowed in schema sources: '" + path.string() + "'");
     }
 
@@ -204,7 +206,7 @@ private:
     const auto manifest = directory / "dbdiff.schema";
     std::error_code error;
     if (std::filesystem::is_regular_file(manifest, error) && !error) {
-      process_manifest(manifest);
+      process(manifest);
       return;
     }
 
@@ -240,10 +242,7 @@ private:
     }
     visiting_manifests_.insert(key);
 
-    std::ifstream input{canonical_manifest};
-    if (!input) {
-      source_error("cannot open schema manifest '" + manifest.string() + "'");
-    }
+    std::istringstream input{read_sql(canonical_manifest)};
     std::string line;
     std::size_t line_number = 0;
     while (std::getline(input, line)) {
@@ -294,6 +293,7 @@ private:
     files_.push_back(ResolvedSource{"<stdin>", {}, std::move(sql)});
   }
 
+  std::filesystem::path input_base_;
   std::filesystem::path base_;
   std::filesystem::path migrations_;
   StdinReader stdin_reader_;
@@ -308,7 +308,8 @@ private:
 SourceResolver::SourceResolver(const std::filesystem::path& base_directory,
                                const std::filesystem::path& migrations_directory,
                                StdinReader stdin_reader)
-    : base_directory_{canonical_allow_missing(absolute_normal(base_directory))},
+    : input_base_directory_{absolute_normal(base_directory)},
+      base_directory_{canonical_allow_missing(input_base_directory_)},
       migrations_directory_{canonical_allow_missing(absolute_normal(migrations_directory))},
       stdin_reader_{std::move(stdin_reader)} {
   if (!stdin_reader_) {
@@ -317,7 +318,8 @@ SourceResolver::SourceResolver(const std::filesystem::path& base_directory,
 }
 
 SourceSet SourceResolver::resolve(const std::vector<std::filesystem::path>& entries) const {
-  return Resolution{base_directory_, migrations_directory_, stdin_reader_}.run(entries);
+  return Resolution{input_base_directory_, base_directory_, migrations_directory_, stdin_reader_}
+      .run(entries);
 }
 
 bool is_valid_utf8(const std::string_view value) noexcept {
