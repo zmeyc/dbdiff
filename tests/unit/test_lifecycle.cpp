@@ -238,7 +238,7 @@ CREATE TABLE items(
 }
 
 TEST_CASE("SQLite lifecycle resumes only an edited incomplete suffix",
-          "[unit][MIG-002][MIG-003][MIG-004][SQL-003][APP-006]") {
+          "[unit][MIG-002][MIG-003][MIG-004][SQL-003][APP-006][OPS-001]") {
   dbdiff::test::TempDirectory directory;
   const auto config = write_sqlite_project(directory);
   const auto database_path = directory.path() / "resume.sqlite";

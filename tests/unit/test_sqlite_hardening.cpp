@@ -223,7 +223,7 @@ TEST_CASE("SQLite opens only plain persistent non-symlink paths", "[unit][sqlite
 }
 
 TEST_CASE("SQLite busy handling serializes rollback-journal and WAL writers",
-          "[unit][sqlite][SQT-005]") {
+          "[unit][sqlite][SQT-005][OPS-002]") {
   dbdiff::test::TempDirectory directory;
   require_writer_waits_safely(directory.path() / "rollback.sqlite", "DELETE", "after_rollback");
   require_writer_waits_safely(directory.path() / "wal.sqlite", "WAL", "after_wal");
