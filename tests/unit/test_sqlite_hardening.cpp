@@ -228,3 +228,41 @@ TEST_CASE("SQLite busy handling serializes rollback-journal and WAL writers",
   require_writer_waits_safely(directory.path() / "rollback.sqlite", "DELETE", "after_rollback");
   require_writer_waits_safely(directory.path() / "wal.sqlite", "WAL", "after_wal");
 }
+
+TEST_CASE("SQLite connection settings enforce lock and statement deadlines",
+          "[unit][sqlite][SQT-005][OPS-001][MIG-006]") {
+  SECTION("lock timeout") {
+    dbdiff::test::TempDirectory directory;
+    const auto path = directory.path() / "timeout.sqlite";
+    RawDatabase holder{path};
+    holder.execute("CREATE TABLE seed(id INTEGER PRIMARY KEY);");
+    holder.execute("BEGIN IMMEDIATE;");
+
+    auto contender = dbdiff::sqlite::Database::open(
+        path, dbdiff::sqlite::OpenMode::read_write,
+        dbdiff::sqlite::ConnectionSettings{.lock_timeout = 25ms, .statement_timeout = 1s});
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_THROWS_AS(contender.execute_source("CREATE TABLE blocked(id INTEGER);"), dbdiff::Error);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < 1s);
+    holder.execute("COMMIT;");
+  }
+
+  SECTION("statement timeout rolls back visible transaction") {
+    auto database = dbdiff::sqlite::Database::temporary(
+        dbdiff::sqlite::ConnectionSettings{.lock_timeout = 1s, .statement_timeout = 1ms});
+    CHECK_THROWS_AS(database.execute_migration(R"sql(
+BEGIN IMMEDIATE;
+CREATE TABLE timed(value INTEGER);
+WITH RECURSIVE counter(value) AS (
+  VALUES(1)
+  UNION ALL
+  SELECT value + 1 FROM counter WHERE value < 10000000
+)
+INSERT INTO timed SELECT value FROM counter;
+COMMIT;
+)sql"),
+                    dbdiff::Error);
+    CHECK(database.inspect().tables.empty());
+  }
+}

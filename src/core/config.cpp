@@ -192,7 +192,7 @@ std::chrono::milliseconds parse_duration(const std::filesystem::path& file, cons
   }
 
   if (number == 0 ||
-      number > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) / multiplier) {
+      number > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) / multiplier) {
     config_error(file, "'" + std::string{key} + "' is outside the supported range");
   }
   return std::chrono::milliseconds{static_cast<std::int64_t>(number * multiplier)};

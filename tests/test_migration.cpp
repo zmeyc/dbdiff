@@ -48,6 +48,27 @@ TEST_CASE("migration metadata rejects malformed and incomplete headers", "[unit]
   CHECK_THROWS_AS(dbdiff::parse_migration_metadata(header), dbdiff::Error);
 }
 
+TEST_CASE("migration engine versions are backend-specific and bounded",
+          "[unit][MIG-001][MIG-006]") {
+  CHECK_NOTHROW(dbdiff::validate_engine_version(dbdiff::BackendKind::sqlite, "3.45.0"));
+  CHECK_NOTHROW(dbdiff::validate_engine_version(dbdiff::BackendKind::sqlite, "3.999.999"));
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::sqlite, "3.44.99"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::sqlite, "3.45"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::sqlite, "latest"),
+                  dbdiff::Error);
+
+  CHECK_NOTHROW(dbdiff::validate_engine_version(dbdiff::BackendKind::postgresql, "150000"));
+  CHECK_NOTHROW(dbdiff::validate_engine_version(dbdiff::BackendKind::postgresql, "189999"));
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::postgresql, "149999"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::postgresql, "190000"),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(dbdiff::validate_engine_version(dbdiff::BackendKind::postgresql, "18"),
+                  dbdiff::Error);
+}
+
 TEST_CASE("migration filenames are constrained and return their version", "[unit][MIG-001]") {
   CHECK(dbdiff::validate_migration_filename("20260731120000_create_users.sql") ==
         "20260731120000_create_users");

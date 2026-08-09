@@ -31,6 +31,7 @@ struct MigrationFile {
 
 [[nodiscard]] MigrationMetadata parse_migration_metadata(std::string_view sql);
 [[nodiscard]] std::string render_migration_metadata(const MigrationMetadata& metadata);
+void validate_engine_version(BackendKind backend, std::string_view version);
 [[nodiscard]] std::string validate_migration_filename(const std::filesystem::path& file);
 [[nodiscard]] MigrationFile load_migration(const std::filesystem::path& file,
                                            BackendKind expected_backend);

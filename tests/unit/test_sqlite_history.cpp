@@ -104,7 +104,7 @@ COMMIT;
   CHECK_FALSE(history.entries[0].engine_version.empty());
   CHECK(history.entries[0].attempted_file_sha256 == repaired_sha);
   REQUIRE(history.entries[0].completed_file_sha256.has_value());
-  CHECK(*history.entries[0].completed_file_sha256 == repaired_sha);
+  CHECK(history.entries[0].completed_file_sha256.value_or("") == repaired_sha);
   REQUIRE(history.entries[0].units.size() == 2U);
 
   const auto recovered = database.recover_revisions("20260808010101_accounts");
@@ -139,6 +139,56 @@ TEST_CASE("SQLite migration checksums cover every exact file byte", "[unit][sqli
   REQUIRE(recovered.size() == 1U);
   CHECK(recovered[0].sql == sql);
   CHECK(recovered[0].exact_file_sha256 == hash);
+}
+
+TEST_CASE("SQLite history rejects invalid or incompatible engine metadata",
+          "[unit][sqlite][history][MIG-006]") {
+  dbdiff::test::TempDirectory directory;
+  const auto path = directory.path() / "engine.sqlite";
+  const std::string failed{R"sql(BEGIN;
+CREATE TABLE first(id INTEGER);
+COMMIT;
+BEGIN;
+CREATE TABLE first(id INTEGER);
+COMMIT;
+)sql"};
+  const std::string repaired{R"sql(BEGIN;
+CREATE TABLE first(id INTEGER);
+COMMIT;
+BEGIN;
+CREATE TABLE second(id INTEGER);
+COMMIT;
+)sql"};
+  {
+    auto database =
+        dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write_create);
+    CHECK_THROWS_AS(
+        database.apply_version("20260808020203_engine", dbdiff::sha256_hex(failed), failed, false),
+        dbdiff::Error);
+  }
+
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
+  const auto close_raw = [](sqlite3* database) { static_cast<void>(sqlite3_close_v2(database)); };
+  const std::unique_ptr<sqlite3, decltype(close_raw)> connection{raw, close_raw};
+  REQUIRE(sqlite3_exec(connection.get(),
+                       "UPDATE _dbdiff_migrations SET engine_version='3.999.999';", nullptr,
+                       nullptr, nullptr) == SQLITE_OK);
+
+  {
+    auto database = dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write);
+    CHECK_THROWS_AS(database.apply_version("20260808020203_engine", dbdiff::sha256_hex(repaired),
+                                           repaired, true),
+                    dbdiff::Error);
+  }
+
+  REQUIRE(sqlite3_exec(connection.get(),
+                       "UPDATE _dbdiff_migrations SET engine_version='not-a-version';", nullptr,
+                       nullptr, nullptr) == SQLITE_OK);
+  {
+    auto database = dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_only);
+    CHECK_THROWS_AS(database.read_history(), dbdiff::Error);
+  }
 }
 
 TEST_CASE("SQLite standalone DDL can resume from an edited incomplete suffix",

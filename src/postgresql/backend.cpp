@@ -2,6 +2,7 @@
 
 #include "dbdiff/error.hpp"
 #include "dbdiff/hash.hpp"
+#include "dbdiff/migration.hpp"
 
 #include <libpq-fe.h>
 #include <openssl/rand.h>
@@ -1214,6 +1215,22 @@ template <typename... Parameters>
 #endif
 }
 
+void configure_connection(pqxx::transaction_base& transaction, const ConnectionSettings& settings) {
+  constexpr auto maximum_timeout = std::numeric_limits<int>::max();
+  if (settings.lock_timeout.count() <= 0 || settings.lock_timeout.count() > maximum_timeout ||
+      settings.statement_timeout.count() <= 0 ||
+      settings.statement_timeout.count() > maximum_timeout) {
+    throw Error{ErrorCode::configuration, "PostgreSQL connection timeouts are outside range"};
+  }
+  execute_no_rows(transaction, "SET standard_conforming_strings TO on");
+  execute_no_rows(transaction,
+                  "SET statement_timeout TO " +
+                      quote_literal(std::to_string(settings.statement_timeout.count()) + "ms"));
+  execute_no_rows(transaction,
+                  "SET lock_timeout TO " +
+                      quote_literal(std::to_string(settings.lock_timeout.count()) + "ms"));
+}
+
 constexpr std::string_view advisory_lock_sql =
     "SELECT pg_catalog.pg_advisory_lock(168430090, 1145194822)";
 constexpr std::string_view advisory_unlock_sql =
@@ -1367,6 +1384,12 @@ void validate_stored_hash(const std::string_view hash, const std::string_view de
         (completed_hash.has_value() && *completed_hash != attempted_hash)) {
       throw Error{ErrorCode::drift,
                   "PostgreSQL migration history contains an invalid migration record"};
+    }
+    try {
+      validate_engine_version(BackendKind::postgresql, engine_version);
+    } catch (const Error&) {
+      throw Error{ErrorCode::drift,
+                  "PostgreSQL migration history contains an invalid engine version"};
     }
     const auto index = history.entries.size();
     if (!entry_indexes.emplace(version, index).second) {
@@ -1941,10 +1964,12 @@ introspect_connection(pqxx::connection& connection,
 }
 
 void drop_scratch_database(const ConnectionLocator& provisioning_locator,
-                           const ScratchIdentity& identity, const std::uint64_t owner_oid) {
+                           const ScratchIdentity& identity, const std::uint64_t owner_oid,
+                           const ConnectionSettings& settings) {
   const auto connection_string = provisioning_locator.connection_string();
   pqxx::connection connection{connection_string.c_str()};
   pqxx::nontransaction transaction{connection};
+  configure_connection(transaction, settings);
 
   const auto rows =
       execute_one_parameter(transaction,
@@ -1977,9 +2002,10 @@ void drop_scratch_database(const ConnectionLocator& provisioning_locator,
 
 [[nodiscard]] bool try_creation_cleanup(const ConnectionLocator& provisioning_locator,
                                         const ScratchIdentity& identity,
-                                        const std::uint64_t owner_oid) noexcept {
+                                        const std::uint64_t owner_oid,
+                                        const ConnectionSettings& settings) noexcept {
   try {
-    drop_scratch_database(provisioning_locator, identity, owner_oid);
+    drop_scratch_database(provisioning_locator, identity, owner_oid, settings);
     return true;
   } catch (const std::exception&) {
     return false;
@@ -4092,13 +4118,13 @@ Database::Database(Database&&) noexcept = default;
 
 Database& Database::operator=(Database&&) noexcept = default;
 
-Database Database::open(const ConnectionLocator& locator) {
+Database Database::open(const ConnectionLocator& locator, const ConnectionSettings settings) {
   try {
     const auto connection_string = locator.connection_string();
     auto connection = std::make_unique<pqxx::connection>(connection_string.c_str());
     pqxx::nontransaction transaction{*connection};
+    configure_connection(transaction, settings);
     const auto version = connection_server_version(transaction);
-    execute_no_rows(transaction, "SET standard_conforming_strings TO on");
     return Database{std::make_unique<Impl>(std::move(connection), version)};
   } catch (const Error&) {
     throw;
@@ -4107,8 +4133,8 @@ Database Database::open(const ConnectionLocator& locator) {
   }
 }
 
-Database Database::open(const std::string_view locator) {
-  return open(ConnectionLocator::parse(locator));
+Database Database::open(const std::string_view locator, const ConnectionSettings settings) {
+  return open(ConnectionLocator::parse(locator), settings);
 }
 
 bool Database::is_open() const noexcept {
@@ -4370,15 +4396,16 @@ struct ScratchDatabase::Impl {
   ScratchIdentity identity;
   ServerVersion version;
   std::uint64_t owner_oid{};
+  ConnectionSettings settings;
   std::unique_ptr<Database> database;
   bool closed{false};
 
   Impl(ConnectionLocator provisioning_locator_value, ScratchIdentity identity_value,
        const ServerVersion server_version, const std::uint64_t provisioning_owner_oid,
-       Database database_session)
+       const ConnectionSettings connection_settings, Database database_session)
       : provisioning_locator{std::move(provisioning_locator_value)},
         identity{std::move(identity_value)}, version{server_version},
-        owner_oid{provisioning_owner_oid},
+        owner_oid{provisioning_owner_oid}, settings{connection_settings},
         database{std::make_unique<Database>(std::move(database_session))} {}
 
   ~Impl() {
@@ -4396,7 +4423,7 @@ struct ScratchDatabase::Impl {
       return;
     }
     database.reset();
-    drop_scratch_database(provisioning_locator, identity, owner_oid);
+    drop_scratch_database(provisioning_locator, identity, owner_oid, settings);
     closed = true;
   }
 };
@@ -4404,7 +4431,8 @@ struct ScratchDatabase::Impl {
 ScratchDatabase::ScratchDatabase(std::unique_ptr<Impl> implementation)
     : implementation_{std::move(implementation)} {}
 
-ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_locator) {
+ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_locator,
+                                        const ConnectionSettings settings) {
   const auto identity = ScratchIdentity::generate();
   std::uint64_t owner_oid{};
   ServerVersion version{};
@@ -4415,6 +4443,7 @@ ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_lo
     pqxx::connection provisioning_connection{connection_string.c_str()};
     {
       pqxx::nontransaction transaction{provisioning_connection};
+      configure_connection(transaction, settings);
       version = connection_server_version(transaction);
       owner_oid = provisioning_owner(transaction);
       if (execute_one_row(transaction, "SELECT pg_catalog.current_database()")[0]
@@ -4431,17 +4460,19 @@ ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_lo
     }
 
     const auto database_locator = provisioning_locator.with_database(identity.name.value());
-    auto database = Database::open(database_locator);
+    auto database = Database::open(database_locator, settings);
     return ScratchDatabase{std::make_unique<Impl>(provisioning_locator, identity, version,
-                                                  owner_oid, std::move(database))};
+                                                  owner_oid, settings, std::move(database))};
   } catch (const Error& error) {
-    if (database_created && !try_creation_cleanup(provisioning_locator, identity, owner_oid)) {
+    if (database_created &&
+        !try_creation_cleanup(provisioning_locator, identity, owner_oid, settings)) {
       throw Error{error.code(),
                   std::string{error.what()} + "; automatic scratch cleanup also failed"};
     }
     throw;
   } catch (const std::exception&) {
-    if (database_created && !try_creation_cleanup(provisioning_locator, identity, owner_oid)) {
+    if (database_created &&
+        !try_creation_cleanup(provisioning_locator, identity, owner_oid, settings)) {
       throw Error{ErrorCode::database,
                   "PostgreSQL scratch database creation and automatic cleanup failed"};
     }
@@ -4449,8 +4480,9 @@ ScratchDatabase ScratchDatabase::create(const ConnectionLocator& provisioning_lo
   }
 }
 
-ScratchDatabase ScratchDatabase::create(const std::string_view provisioning_locator) {
-  return create(ConnectionLocator::parse(provisioning_locator));
+ScratchDatabase ScratchDatabase::create(const std::string_view provisioning_locator,
+                                        const ConnectionSettings settings) {
+  return create(ConnectionLocator::parse(provisioning_locator), settings);
 }
 
 ScratchDatabase::ScratchDatabase(ScratchDatabase&&) noexcept = default;

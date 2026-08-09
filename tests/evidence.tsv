@@ -70,6 +70,8 @@ MIG-005	unit	create reconstructs fresh databases without resolving the live targ
 MIG-005	unit	PostgreSQL planner creates schemas and tables in dependency order
 MIG-005	integration	dbdiff_cli_lifecycle_integration
 MIG-005	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+MIG-006	unit	migration engine versions are backend-specific and bounded
+MIG-006	unit	SQLite history rejects invalid or incompatible engine metadata
 APP-001	unit	SQLite apply, status, drift, and recover use only database-recorded history
 APP-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 APP-002	unit	SQLite apply, status, drift, and recover use only database-recorded history
@@ -136,3 +138,5 @@ SCR-004	unit	Docker PostgreSQL destructor performs verified best-effort cleanup
 SCR-004	integration	integration.docker.Docker PostgreSQL scratch is reachable and explicitly removable
 SCR-005	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
 OPS-001	integration	integration.docker.System process runner preserves argv boundaries and enforces timeout
+OPS-004	unit	SQLite connection settings enforce lock and statement deadlines
+OPS-004	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated

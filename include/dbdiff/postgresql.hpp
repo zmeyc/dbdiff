@@ -5,6 +5,7 @@
 #include "dbdiff/script.hpp"
 #include "dbdiff/source.hpp"
 
+#include <chrono>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -268,6 +269,13 @@ struct MigrationApplyResult {
   bool operator==(const MigrationApplyResult&) const = default;
 };
 
+struct ConnectionSettings {
+  std::chrono::milliseconds lock_timeout{5000};
+  std::chrono::milliseconds statement_timeout{300000};
+
+  bool operator==(const ConnectionSettings&) const = default;
+};
+
 [[nodiscard]] MigrationApplyResult
 validate_migration_resume(const std::optional<MigrationHistoryEntry>& history,
                           const ParsedScript& candidate, std::string_view exact_file_sha256,
@@ -275,8 +283,9 @@ validate_migration_resume(const std::optional<MigrationHistoryEntry>& history,
 
 class Database final {
 public:
-  [[nodiscard]] static Database open(const ConnectionLocator& locator);
-  [[nodiscard]] static Database open(std::string_view locator);
+  [[nodiscard]] static Database open(const ConnectionLocator& locator,
+                                     ConnectionSettings settings = {});
+  [[nodiscard]] static Database open(std::string_view locator, ConnectionSettings settings = {});
 
   Database(Database&&) noexcept;
   Database& operator=(Database&&) noexcept;
@@ -309,8 +318,10 @@ private:
 
 class ScratchDatabase {
 public:
-  [[nodiscard]] static ScratchDatabase create(const ConnectionLocator& provisioning_locator);
-  [[nodiscard]] static ScratchDatabase create(std::string_view provisioning_locator);
+  [[nodiscard]] static ScratchDatabase create(const ConnectionLocator& provisioning_locator,
+                                              ConnectionSettings settings = {});
+  [[nodiscard]] static ScratchDatabase create(std::string_view provisioning_locator,
+                                              ConnectionSettings settings = {});
 
   ScratchDatabase(ScratchDatabase&&) noexcept;
   ScratchDatabase& operator=(ScratchDatabase&&) noexcept;

@@ -2,6 +2,7 @@
 
 #include "dbdiff/error.hpp"
 #include "dbdiff/hash.hpp"
+#include "dbdiff/migration.hpp"
 
 #include <sqlite3.h>
 
@@ -717,7 +718,39 @@ int deny_unsafe_schema_action(void*, const int action, const char*, const char* 
   return value;
 }
 
-void configure_database(sqlite3* database) {
+struct ProgressState {
+  std::chrono::milliseconds timeout;
+  std::chrono::steady_clock::time_point deadline{};
+  bool active{false};
+};
+
+[[nodiscard]] int cancel_expired_statement(void* state) noexcept {
+  auto& progress = *static_cast<ProgressState*>(state);
+  if (progress.active && std::chrono::steady_clock::now() >= progress.deadline) {
+    progress.active = false;
+    return 1;
+  }
+  return 0;
+}
+
+class OperationDeadline final {
+public:
+  explicit OperationDeadline(ProgressState& state) : state_{state} {
+    state_.deadline = std::chrono::steady_clock::now() + state_.timeout;
+    state_.active = true;
+  }
+
+  OperationDeadline(const OperationDeadline&) = delete;
+  OperationDeadline& operator=(const OperationDeadline&) = delete;
+
+  ~OperationDeadline() { state_.active = false; }
+
+private:
+  ProgressState& state_;
+};
+
+void configure_database(sqlite3* database, ProgressState& progress,
+                        const ConnectionSettings& settings) {
   if (sqlite3_libversion_number() < minimum_sqlite_version) {
     throw Error{ErrorCode::unsupported,
                 "SQLite 3.45.0 or newer is required; loaded " + std::string{sqlite3_libversion()}};
@@ -728,23 +761,31 @@ void configure_database(sqlite3* database) {
                 "the loaded SQLite library omits foreign-key or trigger support"};
   }
 
+  if (settings.lock_timeout.count() <= 0 || settings.lock_timeout.count() > INT_MAX ||
+      settings.statement_timeout.count() <= 0 || settings.statement_timeout.count() > INT_MAX) {
+    throw Error{ErrorCode::configuration, "SQLite connection timeouts are outside range"};
+  }
+
+  progress.timeout = settings.statement_timeout;
+  sqlite3_progress_handler(database, 1000, cancel_expired_statement, &progress);
+
   auto result = sqlite3_extended_result_codes(database, 1);
   if (result != SQLITE_OK) {
     throw_sqlite(database, result, "enabling extended result codes");
   }
-  result = sqlite3_busy_timeout(database, 5'000);
+  result = sqlite3_busy_timeout(database, static_cast<int>(settings.lock_timeout.count()));
   if (result != SQLITE_OK) {
     throw_sqlite(database, result, "setting busy timeout");
   }
 
-  const std::array settings{
+  const std::array database_settings{
       std::pair{SQLITE_DBCONFIG_DEFENSIVE, 1},
       std::pair{SQLITE_DBCONFIG_DQS_DDL, 0},
       std::pair{SQLITE_DBCONFIG_DQS_DML, 0},
       std::pair{SQLITE_DBCONFIG_LEGACY_ALTER_TABLE, 0},
       std::pair{SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0},
   };
-  for (const auto& [setting, value] : settings) {
+  for (const auto& [setting, value] : database_settings) {
     int previous = 0;
     result = sqlite3_db_config(database, setting, value, &previous);
     if (result != SQLITE_OK) {
@@ -2065,6 +2106,11 @@ void ensure_history_storage(sqlite3* database) {
          !is_lower_sha256(*entry.completed_file_sha256))) {
       throw_history_corruption("migration row contains invalid values");
     }
+    try {
+      validate_engine_version(BackendKind::sqlite, entry.engine_version);
+    } catch (const Error&) {
+      throw_history_corruption("migration row contains an invalid engine version");
+    }
 
     Statement units{database,
                     "SELECT ordinal,exact_sha256,explicit_transaction,before_schema_sha256,"
@@ -2289,7 +2335,8 @@ void copy_database(sqlite3* source, sqlite3* destination) {
 } // namespace
 
 struct Database::Impl {
-  Impl(const std::string& locator, const OpenMode mode) {
+  Impl(const std::string& locator, const OpenMode mode, const ConnectionSettings& settings)
+      : settings{settings}, progress{settings.statement_timeout} {
     const auto result = sqlite3_open_v2(locator.c_str(), &handle, open_flags(mode), nullptr);
     if (result != SQLITE_OK) {
       const auto message = sqlite_error_message(handle, result, "opening database");
@@ -2300,7 +2347,7 @@ struct Database::Impl {
       throw Error{ErrorCode::database, message};
     }
     try {
-      configure_database(handle);
+      configure_database(handle, progress, settings);
     } catch (...) {
       static_cast<void>(sqlite3_close_v2(handle));
       handle = nullptr;
@@ -2315,6 +2362,8 @@ struct Database::Impl {
   }
 
   sqlite3* handle{nullptr};
+  ConnectionSettings settings;
+  ProgressState progress;
 };
 
 std::vector<StatementSpan> scan_statements(const std::string_view sql) {
@@ -2357,16 +2406,18 @@ Database::~Database() = default;
 Database::Database(Database&&) noexcept = default;
 Database& Database::operator=(Database&&) noexcept = default;
 
-Database Database::temporary() {
-  return Database{std::make_unique<Impl>(std::string{}, OpenMode::read_write_create)};
+Database Database::temporary(const ConnectionSettings settings) {
+  return Database{std::make_unique<Impl>(std::string{}, OpenMode::read_write_create, settings)};
 }
 
-Database Database::open(const std::filesystem::path& path, const OpenMode mode) {
+Database Database::open(const std::filesystem::path& path, const OpenMode mode,
+                        const ConnectionSettings settings) {
   validate_database_path(path);
-  return Database{std::make_unique<Impl>(path.string(), mode)};
+  return Database{std::make_unique<Impl>(path.string(), mode, settings)};
 }
 
 void Database::execute_source(const std::string_view sql) {
+  OperationDeadline deadline{implementation_->progress};
   const auto statements = scan_statements(sql);
   validate_source_statements(sql, statements);
 
@@ -2386,6 +2437,7 @@ void Database::execute_source(const std::string_view sql) {
 }
 
 void Database::execute_migration(const std::string_view sql) {
+  OperationDeadline deadline{implementation_->progress};
   const auto statements = scan_statements(sql);
   validate_migration_statements(sql, statements);
   const auto foreign_keys = query_integer(implementation_->handle, "PRAGMA foreign_keys;");
@@ -2410,6 +2462,7 @@ void Database::execute_migration(const std::string_view sql) {
 }
 
 void Database::execute_prefix(const std::string_view sql, const std::size_t completed_unit_count) {
+  OperationDeadline deadline{implementation_->progress};
   auto statements = scan_statements(sql);
   validate_migration_statements(sql, statements);
   auto parsed = build_execution_units(std::string{sql}, std::move(statements));
@@ -2433,6 +2486,8 @@ void Database::execute_prefix(const std::string_view sql, const std::size_t comp
 }
 
 void Database::backup_to(Database& destination) const {
+  OperationDeadline source_deadline{implementation_->progress};
+  OperationDeadline destination_deadline{destination.implementation_->progress};
   if (implementation_.get() == destination.implementation_.get()) {
     throw Error{ErrorCode::database, "SQLite backup source and destination must be different"};
   }
@@ -2447,10 +2502,12 @@ void Database::backup_to(Database& destination) const {
 }
 
 MigrationHistory Database::read_history() const {
+  OperationDeadline deadline{implementation_->progress};
   return read_history_database(implementation_->handle);
 }
 
 std::vector<MigrationRevision> Database::recover_revisions(const std::string_view version) const {
+  OperationDeadline deadline{implementation_->progress};
   if (!history_storage_exists(implementation_->handle)) {
     return {};
   }
@@ -2477,6 +2534,7 @@ std::vector<MigrationRevision> Database::recover_revisions(const std::string_vie
 MigrationApplyResult Database::apply_version(const std::string_view version,
                                              const std::string_view exact_file_sha256,
                                              const std::string_view sql, const bool resume) {
+  OperationDeadline deadline{implementation_->progress};
   require_history_inputs(version, exact_file_sha256, sql);
   auto statements = scan_statements(sql);
   validate_migration_statements(sql, statements);
@@ -2505,6 +2563,10 @@ MigrationApplyResult Database::apply_version(const std::string_view version,
   }
   if (!existing && resume) {
     throw_migration("migration '" + std::string{version} + "' has no incomplete attempt to resume");
+  }
+  if (existing && found->engine_version != sqlite3_libversion()) {
+    throw Error{ErrorCode::unsupported,
+                "cannot resume a SQLite migration attempt with a different engine version"};
   }
 
   record_attempt(implementation_->handle, version, exact_file_sha256, parsed.sql, existing);
@@ -2615,7 +2677,7 @@ MigrationApplyResult Database::apply_version(const std::string_view version,
         continue;
       }
 
-      auto clone = Database::temporary();
+      auto clone = Database::temporary(implementation_->settings);
       copy_database(implementation_->handle, clone.implementation_->handle);
       const auto unit_foreign_keys = query_integer(implementation_->handle, "PRAGMA foreign_keys;");
       execute_one(clone.implementation_->handle,
@@ -2646,7 +2708,10 @@ MigrationApplyResult Database::apply_version(const std::string_view version,
   return MigrationApplyResult{false, parsed.units.size(), std::string{exact_file_sha256}};
 }
 
-SchemaSnapshot Database::inspect() const { return inspect_database(implementation_->handle); }
+SchemaSnapshot Database::inspect() const {
+  OperationDeadline deadline{implementation_->progress};
+  return inspect_database(implementation_->handle);
+}
 
 Plan plan(const SchemaSnapshot& from, const SchemaSnapshot& to) { return make_plan(from, to); }
 

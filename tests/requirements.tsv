@@ -28,7 +28,7 @@ MIG-002	migration	supported	unit	Failed units retain an immutable completed chec
 MIG-003	migration	supported	unit	Completed unit bytes order and transaction boundaries are immutable during resume
 MIG-004	migration	supported	unit+integration	Exact attempted SQL revisions are stored in the database and can be recovered
 MIG-005	migration	supported	unit+integration	Generated BEGIN and COMMIT are visible in the SQL and execution adds no hidden transaction boundary
-MIG-006	migration	planned	-	Recorded engine versions are checked for replay compatibility rather than accepted as arbitrary metadata
+MIG-006	migration	supported	unit	Engine metadata is backend-formatted and invalid history or incompatible SQLite resume versions fail closed
 APP-001	apply	supported	unit+integration	Complete history applied-prefix and master reconstruction gates run before live writes
 APP-002	apply	supported	unit+integration	Live schema comparison uses only the reconstructed applied migration prefix
 APP-003	apply	supported	unit+integration	Live drift blocks apply and is never converted into repair SQL
@@ -79,3 +79,4 @@ UPG-004	upgrade	planned	-	Post-upgrade live state must equal reconstruction on t
 OPS-001	operations	supported	integration	The external process runner preserves argv boundaries and terminates timed-out children
 OPS-002	operations	planned	-	Concurrent lifecycle executors serialize without an unlocked validation-to-write interval
 OPS-003	operations	planned	-	Cancellation disconnect and exceptional exits synchronously report or clean every owned scratch resource
+OPS-004	operations	supported	unit+integration	Configured SQLite lock and statement deadlines and PostgreSQL statement deadlines interrupt bounded operations
