@@ -133,10 +133,71 @@ struct Table {
   auto operator<=>(const Table&) const = default;
 };
 
+enum class ConstraintKind { primary_key, unique, check, foreign_key, not_null };
+
+struct TableConstraint {
+  QualifiedName table;
+  std::string name;
+  ConstraintKind kind{ConstraintKind::check};
+  std::vector<std::string> columns;
+  std::string definition;
+  bool validated{true};
+  bool enforced{true};
+  std::optional<QualifiedName> referenced_table;
+  std::vector<std::string> referenced_columns;
+
+  auto operator<=>(const TableConstraint&) const = default;
+};
+
+struct Index {
+  QualifiedName name;
+  QualifiedName table;
+  std::string method{"btree"};
+  bool unique{false};
+  bool nulls_not_distinct{false};
+  std::vector<std::string> key_expressions;
+  std::vector<std::string> included_columns;
+  std::optional<std::string> predicate;
+
+  auto operator<=>(const Index&) const = default;
+};
+
+enum class PolicyCommand { all, select, insert, update, delete_rows };
+
+struct PolicyRole {
+  bool public_role{false};
+  std::string name;
+
+  auto operator<=>(const PolicyRole&) const = default;
+};
+
+struct RowSecurityPolicy {
+  QualifiedName table;
+  std::string name;
+  PolicyCommand command{PolicyCommand::all};
+  bool permissive{true};
+  std::vector<PolicyRole> roles;
+  std::optional<std::string> using_expression;
+  std::optional<std::string> check_expression;
+
+  auto operator<=>(const RowSecurityPolicy&) const = default;
+};
+
+struct UnsupportedCatalogObject {
+  std::string kind;
+  std::string identity;
+
+  auto operator<=>(const UnsupportedCatalogObject&) const = default;
+};
+
 struct SchemaSnapshot {
   ServerVersion server_version;
   std::vector<std::string> schemas;
   std::vector<Table> tables;
+  std::vector<TableConstraint> constraints;
+  std::vector<Index> indexes;
+  std::vector<RowSecurityPolicy> policies;
+  std::vector<UnsupportedCatalogObject> unsupported_objects;
   std::string semantic_hash;
 
   auto operator<=>(const SchemaSnapshot&) const = default;
@@ -148,6 +209,7 @@ struct SchemaSnapshot {
                                                  const std::vector<std::string>& managed_schemas);
 
 [[nodiscard]] std::vector<StatementSpan> scan_statements(std::string_view sql);
+void validate_source(std::string_view sql);
 [[nodiscard]] ParsedScript parse_migration(std::string sql);
 
 struct MigrationPlan {
