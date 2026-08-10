@@ -68,8 +68,7 @@ TEST_CASE("PostgreSQL locator errors never repeat the supplied secret",
   CHECK_THROWS_AS(pg::ConnectionLocator::parse("host=localhost").with_database(""), dbdiff::Error);
 }
 
-TEST_CASE("PostgreSQL server versions 15 through 18 are accepted",
-          "[unit][postgresql][PG-005]") {
+TEST_CASE("PostgreSQL server versions 15 through 18 are accepted", "[unit][postgresql][PG-005]") {
   CHECK(pg::validate_server_version(150000) == pg::ServerVersion{150000, 15, 0});
   CHECK(pg::parse_server_version("150017") == pg::ServerVersion{150017, 15, 17});
   CHECK(pg::parse_server_version("180004") == pg::ServerVersion{180004, 18, 4});
