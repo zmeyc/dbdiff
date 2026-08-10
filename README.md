@@ -163,8 +163,10 @@ migrations in a chain must target the same major version.
 | `lock_timeout` | Positive duration using `ms`, `s`, `m`, or `h`; default `5s`. |
 | `statement_timeout` | Positive duration using `ms`, `s`, `m`, or `h`; default `5m`. |
 
-Timeout fields are parsed and validated, but enforcement is not yet uniform across every backend
-operation.
+`lock_timeout` bounds cooperative project locking, SQLite busy waits, and PostgreSQL lifecycle and
+server lock waits. `statement_timeout` bounds SQLite execution through a progress deadline and is
+installed on every PostgreSQL session. A timeout aborts the operation without relaxing validation
+or continuing with an unlocked write.
 
 ### Splitting the declarative schema
 
@@ -274,6 +276,12 @@ Before writing, `apply` validates the on-disk chain and stored history, reconstr
 prefix in a fresh database, and compares that result with the live schema. Live drift blocks the
 operation; it is never turned into repair SQL. Pending migrations are then applied in lexical order
 using the transaction boundaries visible in each SQL file.
+
+Every lifecycle command holds a bounded cooperative lock on its project configuration file.
+PostgreSQL `apply`, `status`, and `recover` additionally hold a session advisory lock on the target;
+for `apply`, that lock covers the first history read, drift validation, repeated pre-write check,
+all migration writes, and final convergence. Projects that use different configuration files do
+not share the file lock, so they must not point at the same SQLite target or migration directory.
 
 `--dry-run` performs validation without changing schema or history. `--create-database` permits
 creation of an absent SQLite file and has no PostgreSQL equivalent. `--validate-data` uses a copy of
@@ -390,24 +398,32 @@ Changes needing an unknown data mapping or an unverifiable rowid transition fail
 ### PostgreSQL
 
 PostgreSQL 15–18 connection, scratch creation, statement parsing, resumable history, and focused
-schema planning are implemented. The current semantic snapshot and planner manage only:
+schema planning are implemented. The current semantic snapshot and planner manage:
 
 - explicitly managed schemas;
 - ordinary, non-partitioned, non-extension-owned permanent and UNLOGGED tables;
-- table persistence and row-security/force-row-security flags; and
-- column order, name, formatted type, nullability, default expression, identity generation,
-  generated storage, and explicit collation.
+- table persistence and row-security/force-row-security flags;
+- column order, name, formatted type, nullability, default expression, and identity generation for
+  verified default identity sequences;
+- primary-key, unique, check, and foreign-key constraints, plus named `NOT NULL` constraints on
+  PostgreSQL 18;
+- standalone indexes, including expression and partial keys, sort/null ordering, `INCLUDE`, access
+  method, uniqueness, and `NULLS NOT DISTINCT`; and
+- row-security policies for `PUBLIC`, including command, permissiveness, and `USING`/`WITH CHECK`
+  expressions.
 
 The planner can create and drop managed schemas and tables, append/drop supported columns, change
 defaults and nullability, change table persistence, and toggle table RLS flags. It deliberately
 does not infer renames, reorder columns, or synthesize unsafe type, collation, identity, or generated
-expression conversions.
+expression conversions. Default smallint, integer, and bigint identity sequences are verified;
+custom names or sequence options currently fail closed instead of being silently normalized.
 
-Constraints, indexes, sequences, enums, domains, views, materialized views, routines, triggers,
-policies, comments, partitioned/foreign tables, extension-owned objects, ownership, grants, and
-other security properties are not yet semantically managed. The declarative source executor may
-accept some persistent PostgreSQL DDL outside the focused set, but that does not make those objects
-part of diff generation or drift detection. Do not rely on dbdiff to manage them in this version.
+Standalone sequences, enums, domains, views, materialized views, routines, triggers, comments,
+partitioned/foreign tables, extension-owned objects, non-`PUBLIC` policy roles, ownership, grants,
+and other security properties are not yet semantically managed. Unsupported objects or relevant
+catalog properties in a managed schema fail closed. The declarative source executor accepting a
+persistent PostgreSQL statement does not by itself make that object part of the supported diff
+model.
 
 ## Building
 
@@ -483,14 +499,15 @@ Run all configured tests with `ctest --preset debug`. Useful focused commands in
 
 ```sh
 ctest --test-dir build/debug --output-on-failure -L integration.sqlite
-DBDIFF_TEST_POSTGRES_MAJOR=18 \
-  bash tests/integration/run_docker_scratch.sh
-bash tests/scripts/validate_requirements.sh
+DBDIFF_TEST_POSTGRES_MAJOR=18 ctest --test-dir build/debug --output-on-failure \
+  -L integration.postgresql
+bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
 ```
 
-The requirements validator reports actual Catch2 evidence tags separately from planned targets.
-`--strict` lists every missing unit or integration tag and exits nonzero while gaps remain; it is a
-release gate, not a way to claim unwritten coverage.
+The requirements matrix separates supported scope from planned work. Its evidence map names exact
+registered unit, integration, and manual scenarios. Strict validation checks each supported row's
+declared evidence contract against the configured CTest registry, rejects evidence attached to
+planned work, and is intended to run after the corresponding tests themselves pass.
 
 The operator-oriented scenarios in [`manual-tests/README.md`](manual-tests/README.md) are
 self-checking and use isolated temporary workspaces. Local SQLite scenarios require `sqlite3`:
