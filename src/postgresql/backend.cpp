@@ -4134,7 +4134,8 @@ struct LifecycleLock::Impl {
       pqxx::nontransaction transaction{*connection};
       const auto row = execute_one_row(transaction, advisory_unlock_sql);
       static_cast<void>(row);
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      static_cast<void>(error);
     }
   }
 

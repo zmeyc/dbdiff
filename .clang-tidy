@@ -11,6 +11,6 @@ Checks: >-
   modernize-use-override,
   performance-*,
   portability-*
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 HeaderFilterRegex: '^(include|src|tests)/'
 FormatStyle: file
