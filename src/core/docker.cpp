@@ -419,12 +419,16 @@ PostgresContainer PostgresContainer::create(PostgresContainerOptions options,
     const auto readiness_deadline =
         std::chrono::steady_clock::now() + state.options.readiness_timeout;
     while (true) {
-      const auto readiness =
-          state.runner->run({"docker", "exec", state.container_id, "pg_isready", "--username",
-                             state.username, "--dbname", state.database, "--quiet"},
-                            state.options.command_timeout);
-      if (readiness.succeeded()) {
-        break;
+      const auto version_result = state.runner->run(
+          {"docker", "exec", "--env", "PGPASSWORD=" + state.password, state.container_id, "psql",
+           "--host", "127.0.0.1", "--username", state.username, "--dbname", state.database,
+           "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1", "--command",
+           "SHOW server_version_num;"},
+          state.options.command_timeout);
+      if (version_result.succeeded()) {
+        container.require_impl().server_version_number =
+            parse_server_version(version_result.standard_output, state.options.postgres_major);
+        return container;
       }
       const auto now = std::chrono::steady_clock::now();
       if (now >= readiness_deadline) {
@@ -439,15 +443,6 @@ PostgresContainer PostgresContainer::create(PostgresContainerOptions options,
         std::this_thread::sleep_for(pause);
       }
     }
-
-    const auto version_result = state.runner->run(
-        {"docker", "exec", state.container_id, "psql", "--username", state.username, "--dbname",
-         state.database, "--tuples-only", "--no-align", "--command", "SHOW server_version_num;"},
-        state.options.command_timeout);
-    require_success(version_result, "Docker PostgreSQL version inspection");
-    container.require_impl().server_version_number =
-        parse_server_version(version_result.standard_output, state.options.postgres_major);
-    return container;
   } catch (...) {
     container.close_best_effort();
     throw;

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -54,16 +55,12 @@ public:
       return success("127.0.0.1:49152\n");
     }
     if (arguments[1] == "exec") {
-      if (arguments.at(3) == "pg_isready") {
-        ++readiness_calls;
-        if (readiness_failures > 0) {
-          --readiness_failures;
+      if (std::ranges::find(arguments, "psql") != arguments.end()) {
+        ++version_calls;
+        if (version_failures > 0) {
+          --version_failures;
           return docker::ProcessResult{1, false, {}, "not ready"};
         }
-        return success();
-      }
-      if (arguments.at(3) == "psql") {
-        ++version_calls;
         return success(std::to_string(server_version_number) + "\n");
       }
       return docker::ProcessResult{97, false, {}, "unexpected exec command"};
@@ -95,8 +92,7 @@ public:
   std::vector<std::string> remove_arguments;
   std::string ownership_token;
   std::string password;
-  int readiness_failures{};
-  int readiness_calls{};
+  int version_failures{};
   int version_calls{};
   int server_version_number{180000};
   int inspection_calls{};
@@ -158,23 +154,34 @@ TEST_CASE("Docker PostgreSQL commands preserve argv boundaries and secrets",
   }
 }
 
-TEST_CASE("Docker PostgreSQL readiness retries without using a shell", "[unit][docker][SCR-002]") {
+TEST_CASE("Docker PostgreSQL readiness retries the final server version without using a shell",
+          "[unit][docker][SCR-002]") {
   auto runner = std::make_shared<FakeProcessRunner>();
-  runner->readiness_failures = 2;
+  runner->version_failures = 2;
 
   auto container = docker::PostgresContainer::create(test_options(18), runner);
-  CHECK(runner->readiness_calls == 3);
+  CHECK(runner->version_calls == 3);
+  bool saw_version_query = false;
   for (const auto& call : runner->calls) {
     CHECK(std::ranges::find(call, "/bin/sh") == call.end());
     CHECK(std::ranges::find(call, "-c") == call.end());
+    if (std::ranges::find(call, "psql") != call.end()) {
+      saw_version_query = true;
+      CHECK(argument_with_prefix(call, "PGPASSWORD=") == runner->password);
+      const auto host = std::ranges::find(call, "--host");
+      REQUIRE(host != call.end());
+      REQUIRE(std::next(host) != call.end());
+      CHECK(*std::next(host) == "127.0.0.1");
+    }
   }
+  CHECK(saw_version_query);
   container.close();
 }
 
 TEST_CASE("Docker PostgreSQL creation failure cleans only verified ownership",
           "[unit][docker][SCR-004]") {
   auto runner = std::make_shared<FakeProcessRunner>();
-  runner->readiness_failures = 1;
+  runner->version_failures = 1;
   auto options = test_options(18);
   options.readiness_timeout = 0ms;
 

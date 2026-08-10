@@ -144,7 +144,7 @@ PG-020	manual	010_postgresql_initial
 SCR-001	unit	PostgreSQL scratch names and markers are safe value objects
 SCR-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 SCR-002	unit	Docker PostgreSQL commands preserve argv boundaries and secrets
-SCR-002	unit	Docker PostgreSQL readiness retries without using a shell
+SCR-002	unit	Docker PostgreSQL readiness retries the final server version without using a shell
 SCR-002	integration	integration.docker.Docker PostgreSQL scratch is reachable and explicitly removable
 SCR-004	unit	Docker PostgreSQL creation failure cleans only verified ownership
 SCR-004	unit	Docker PostgreSQL close refuses a mismatched ownership label
