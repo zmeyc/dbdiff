@@ -109,11 +109,13 @@ SQT-015	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-015	unit	SQLite planner replaces changed indexes views and triggers
 PG-001	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-001	manual	010_postgresql_initial
 PG-002	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
 PG-002	unit	PostgreSQL planner replaces referenced keys around foreign keys
 PG-002	unit	PostgreSQL planner drops policies and indexes before dependent columns
 PG-002	unit	PostgreSQL 18 named not-null constraints are ordered around primary keys
 PG-002	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-002	manual	010_postgresql_initial
 PG-004	unit	PostgreSQL scanner rejects data-bearing sources and server-wide migrations
 PG-004	unit	PostgreSQL snapshot normalization rejects ambiguous catalog state
 PG-005	unit	PostgreSQL server versions 15 through 18 are accepted
@@ -125,16 +127,20 @@ PG-013	unit	PostgreSQL snapshots normalize without retaining catalog OIDs
 PG-013	unit	PostgreSQL planner creates schemas and tables in dependency order
 PG-013	unit	PostgreSQL planner handles supported column changes with hazards
 PG-013	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-013	manual	010_postgresql_initial
 PG-014	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-014	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
 PG-014	unit	PostgreSQL 18 named not-null constraints are ordered around primary keys
 PG-014	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-014	manual	010_postgresql_initial
 PG-015	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-015	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
 PG-015	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-015	manual	010_postgresql_initial
 PG-020	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-020	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
 PG-020	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
+PG-020	manual	010_postgresql_initial
 SCR-001	unit	PostgreSQL scratch names and markers are safe value objects
 SCR-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 SCR-002	unit	Docker PostgreSQL commands preserve argv boundaries and secrets

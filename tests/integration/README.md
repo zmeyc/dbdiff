@@ -18,7 +18,18 @@ when the external `sqlite3` prerequisite is missing. CTest registers it with the
 `integration`, `integration.sqlite`, and `cli`; an unavailable lifecycle command or command failure
 is a test failure, not a skip.
 
-## Docker scratch integration test
+## PostgreSQL lifecycle integration
+
+The PostgreSQL lifecycle case uses one disposable target container and creates independently owned
+scratch databases inside it. It checks session statement deadlines, advisory-lock contention and
+lock lifetime, canonical identity introspection, fail-closed custom identity options, and scratch
+cleanup. It then generates, dry-runs, applies, recovers, and directly inspects two migrations built
+from split declarative sources. The schemas exercise PK/UNIQUE/CHECK/FK constraints, an expression
+and partial `NULLS NOT DISTINCT` index with `INCLUDE`, and a PUBLIC row-security policy. The second
+migration checks dependency ordering and the final no-op creation proves history-to-master
+convergence before deliberate live drift is rejected.
+
+## Docker scratch ownership integration
 
 The integration case starts one label-owned PostgreSQL container, waits with `pg_isready`, runs a
 query, and explicitly removes the exact container after rechecking all ownership labels. The RAII
@@ -35,11 +46,13 @@ cmake --build --preset debug
 DBDIFF_TEST_POSTGRES_MAJOR=18 bash tests/integration/run_docker_scratch.sh
 ```
 
-Run the supported matrix in separate CI jobs:
+Run both Docker-backed suites for the supported matrix in separate CI jobs:
 
 ```sh
 for major in 15 16 17 18; do
-  DBDIFF_TEST_POSTGRES_MAJOR="$major" bash tests/integration/run_docker_scratch.sh
+  DBDIFF_TEST_POSTGRES_MAJOR="$major" \
+    ctest --test-dir build/debug --output-on-failure \
+      -L '^integration\.(docker|postgresql)$'
 done
 ```
 

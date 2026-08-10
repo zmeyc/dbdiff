@@ -5,7 +5,7 @@ set -Eeuo pipefail
 DBDIFF_MANUAL_LIB_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DBDIFF_MANUAL_ROOT="$(CDPATH= cd -- "${DBDIFF_MANUAL_LIB_DIR}/.." && pwd -P)"
 DBDIFF_REPO_ROOT="$(CDPATH= cd -- "${DBDIFF_MANUAL_ROOT}/.." && pwd -P)"
-DBDIFF_BIN="${DBDIFF_BIN:-${DBDIFF_REPO_ROOT}/build/dbdiff}"
+DBDIFF_BIN="${DBDIFF_BIN:-${DBDIFF_REPO_ROOT}/build/debug/dbdiff}"
 DBDIFF_MANUAL_KEEP="${DBDIFF_MANUAL_KEEP:-0}"
 
 declare -a DBDIFF_MANUAL_CONTAINERS=()

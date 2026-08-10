@@ -25,7 +25,7 @@ name prefix, wildcard, or broad Docker filter.
 - Docker CLI and a reachable Docker daemon for PostgreSQL scenarios.
 - `shellcheck` only for linting the scripts.
 
-The default executable is `build/dbdiff`. Select another build explicitly:
+The default executable is `build/debug/dbdiff`. Select another build explicitly:
 
 ```sh
 export DBDIFF_BIN="$PWD/build/debug/dbdiff"
@@ -74,7 +74,7 @@ labels and use the exact container ID.
 | `003_sqlite_rebuild_preserves_data` | A table rebuild preserves rows, row IDs, AUTOINCREMENT state, foreign keys, generated values, views, indexes, and triggers. |
 | `004_sqlite_drift_isolation` | Manual live DDL makes status return 2 and blocks apply, while create remains based only on history and master and does not modify the target. |
 | `005_sqlite_resume_recover` | A committed unit survives a later failure; edits to that unit are rejected; an edited incomplete suffix resumes; stored SQL revisions are recoverable. |
-| `010_postgresql_initial` | Create succeeds with an unreachable target locator, then a disposable target applies, converges, and can replay the migration through `psql`. |
+| `010_postgresql_initial` | Split PostgreSQL sources create constraints, an advanced index, and a row-security policy without resolving the target; dry-run is inert; apply and exact recovery converge; direct `psql` replay succeeds; a no-op create remains target-independent; live drift is reported and blocks apply. |
 
 Each scenario logs its GIVEN/WHEN/THEN checkpoints. Command output is captured beneath the scenario
 workspace and printed only on failure after common credential patterns have been redacted.
