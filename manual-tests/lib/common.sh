@@ -308,7 +308,7 @@ verify_manual_container() {
 start_postgres_container() {
   local role="$1"
   local version="${2:-18}"
-  local password database name container_id port_binding port
+  local password database name container_id port_binding port server_version server_major
   require_docker_opt_in
   [[ "${role}" =~ ^[a-z][a-z0-9_-]*$ ]] || manual_fail "invalid container role: ${role}"
   [[ "${version}" =~ ^(15|16|17|18)$ ]] || manual_fail "unsupported PostgreSQL image version: ${version}"
@@ -332,7 +332,14 @@ start_postgres_container() {
 
   local attempt
   for attempt in $(seq 1 60); do
-    if docker exec "${container_id}" pg_isready --username dbdiff --dbname "${database}" >/dev/null 2>&1; then
+    if server_version="$(docker exec --env "PGPASSWORD=${password}" "${container_id}" \
+      psql --host 127.0.0.1 --username dbdiff --dbname "${database}" --tuples-only --no-align \
+      --set ON_ERROR_STOP=1 --command 'SHOW server_version_num;' 2>/dev/null)"; then
+      server_version="$(printf '%s' "${server_version}" | tr -d '[:space:]')"
+      [[ "${server_version}" =~ ^[0-9]+$ ]] || manual_fail "invalid PostgreSQL server version"
+      server_major=$((server_version / 10000))
+      [[ "${server_major}" -eq "${version}" ]] ||
+        manual_fail "PostgreSQL server major ${server_major} does not match image ${version}"
       break
     fi
     if [[ "${attempt}" -eq 60 ]]; then

@@ -31,8 +31,10 @@ convergence before deliberate live drift is rejected.
 
 ## Docker scratch ownership integration
 
-The integration case starts one label-owned PostgreSQL container, waits with `pg_isready`, runs a
-query, and explicitly removes the exact container after rechecking all ownership labels. The RAII
+The integration case starts one label-owned PostgreSQL container and retries a TCP `psql` version
+query until the final server reports the requested major. Checking the actual server avoids
+mistaking an image entrypoint's temporary bootstrap server for readiness. The case then runs a query
+and explicitly removes the exact container after rechecking all ownership labels. The RAII
 destructor repeats cleanup on an unexpected test failure.
 
 The Docker case is built and registered with the `integration.docker` label when
