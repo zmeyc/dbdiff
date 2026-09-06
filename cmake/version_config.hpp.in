@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace dbdiff {
+
+inline constexpr std::string_view configured_version{"@PROJECT_VERSION@"};
+
+} // namespace dbdiff

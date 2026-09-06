@@ -1,0 +1,9 @@
+.cache
+.git
+build
+build-*
+cmake-build-*
+dist
+node_modules
+vendor
+*.tgz

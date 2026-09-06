@@ -1,11 +1,12 @@
 #include "dbdiff/version.hpp"
 #include "dbdiff/backend.hpp"
+#include "dbdiff/version_config.hpp"
 
 #include <string_view>
 
 namespace dbdiff {
 
-std::string_view version() noexcept { return "0.1.0"; }
+std::string_view version() noexcept { return configured_version; }
 
 std::string_view backend_name(const BackendKind backend) noexcept {
   switch (backend) {

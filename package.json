@@ -1,0 +1,37 @@
+{
+  "name": "@zmeyc/dbdiff",
+  "version": "0.1.0",
+  "description": "Deterministic database schema migration CLI",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {},
+  "bin": {
+    "dbdiff": "bin/dbdiff.mjs"
+  },
+  "files": [
+    "bin/",
+    "scripts/install.mjs",
+    "scripts/package-target.mjs",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.mjs",
+    "test:npm": "node --test tests/npm/*.test.mjs",
+    "release:github": "bash scripts/release-github.sh"
+  },
+  "dependencies": {}
+}

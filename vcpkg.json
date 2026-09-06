@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "builtin-baseline": "c5a15727ee70fddf0296f0d8aafc3f58916fefac",
+  "dependencies": [
+    "catch2",
+    "cli11",
+    "libpq",
+    "libpqxx",
+    "openssl",
+    "sqlite3",
+    "yaml-cpp"
+  ]
+}

@@ -1,7 +1,14 @@
 /build/
 /build-*/
 /cmake-build-*/
+/.release/
+/release/
+/dist/
+/node_modules/
+/vendor/
+/vcpkg_installed/
+/.vcpkg-cache/
 /.cache/
+/*.tgz
 /compile_commands.json
 /.DS_Store
-

@@ -13,6 +13,54 @@ fresh empty database, and plans the change between those two states. The live ta
 SQLite and PostgreSQL are available as backends. Read [Backend scope](#backend-scope) before using
 the PostgreSQL planner; its currently managed object set is deliberately focused.
 
+## Install as an npm devDependency
+
+dbdiff can be installed directly from an exact GitHub tag without publishing the package to the
+npm registry:
+
+```sh
+npm install --save-dev github:zmeyc/dbdiff#v0.1.0
+```
+
+The resulting `package.json` entry is:
+
+```json
+{
+  "devDependencies": {
+    "@zmeyc/dbdiff": "github:zmeyc/dbdiff#v0.1.0"
+  }
+}
+```
+
+Use the package binary from an npm script or through `npx`:
+
+```json
+{
+  "scripts": {
+    "db:status": "dbdiff status",
+    "db:migrate": "dbdiff apply"
+  }
+}
+```
+
+```sh
+npm run db:status
+npx --no-install dbdiff --version
+```
+
+The npm wrapper requires Node.js 22 or newer and downloads a native executable from the public
+GitHub Release matching the package tag. Supported targets are macOS 13 or newer and GNU/Linux with
+glibc 2.35 or newer, on x64 or arm64. Windows and musl-based distributions such as Alpine Linux are
+not supported.
+
+Install immutable version tags only; default-branch and arbitrary-commit installs do not have a
+defined matching release. npm lifecycle scripts must be enabled so `postinstall` can download and
+verify the executable. If installation used `--ignore-scripts`, restore it with:
+
+```sh
+npm rebuild @zmeyc/dbdiff --ignore-scripts=false
+```
+
 ## Quick start with SQLite
 
 Create this layout:
@@ -459,6 +507,24 @@ cmake --install build/release --prefix "$PWD/dist"
 `DBDIFF_BUILD_INTEGRATION_TESTS=ON` is the default. Docker-backed tests skip when the Docker CLI or
 daemon is genuinely unavailable. The local CLI lifecycle test skips only when the external
 `sqlite3` executable is missing; command or behavioral failures remain test failures.
+
+### Publish a GitHub release locally
+
+Release binaries are built and uploaded locally; this workflow does not publish to npm and does not
+depend on GitHub Actions. The release host must be macOS arm64 with Xcode command-line tools,
+Rosetta 2, Docker with Buildx, and an authenticated GitHub CLI (`gh`).
+
+Set the package version, commit it, create the matching tag at that commit, and push both the commit
+and tag. The worktree must be clean before running:
+
+```sh
+npm run release:github -- vX.Y.Z
+```
+
+The command builds macOS arm64 and x64 executables locally, builds GNU/Linux arm64 and x64
+executables through Docker Buildx, and uploads the compressed binaries and checksums to a draft
+GitHub Release before publishing it. Existing releases and assets are never overwritten; issue a
+new version for corrections.
 
 ### Formatting, clang-tidy, and sanitizers
 

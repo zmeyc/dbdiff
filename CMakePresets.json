@@ -34,12 +34,27 @@
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "ON"
       }
+    },
+    {
+      "name": "package",
+      "displayName": "Distribution package",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/package",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "DBDIFF_BUILD_INTEGRATION_TESTS": "OFF",
+        "DBDIFF_DISTRIBUTION_BUILD": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "package", "configurePreset": "package" }
   ],
   "testPresets": [
     {
@@ -54,4 +69,3 @@
     }
   ]
 }
-
