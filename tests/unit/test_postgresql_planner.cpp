@@ -1,7 +1,7 @@
 #include "dbdiff/error.hpp"
 #include "dbdiff/postgresql.hpp"
 
-#include "../../src/postgresql/internal.hpp"
+#include "../../src/postgresql/sql.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 

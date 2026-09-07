@@ -7,6 +7,7 @@
 #include "dbdiff/migration.hpp"
 
 #include "pqxx.hpp"
+#include "sql.hpp"
 #include <libpq-fe.h>
 #include <openssl/rand.h>
 
@@ -77,7 +78,6 @@ bool replayable_session_unit(const ParsedScript& parsed, const ExecutionUnit& un
 void validate_resumable_session_units(const ParsedScript& parsed);
 void execute_unit_prefix(pqxx::nontransaction& transaction, const ParsedScript& parsed,
                          std::size_t completed_unit_count);
-std::vector<std::string> index_key_definitions(std::string_view definition, std::size_t key_count);
 
 class SessionAdvisoryLock final {
 public:

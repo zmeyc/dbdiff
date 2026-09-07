@@ -1,5 +1,12 @@
 include(Catch)
 
+if(DBDIFF_ENABLE_CLANG_TIDY)
+  # Catch2 deliberately chains overloaded comparisons to decompose assertions.
+  # clang-tidy 18 reports those macro expansions and has no IgnoreMacros option.
+  # Keep the check enabled for production targets outside this test directory.
+  list(APPEND CMAKE_CXX_CLANG_TIDY "-checks=-bugprone-chained-comparison")
+endif()
+
 add_executable(
   dbdiff_unit_tests
   test_config.cpp
