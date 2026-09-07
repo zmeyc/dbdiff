@@ -381,8 +381,9 @@ CREATE POLICY sessions_visible
     REQUIRE(foreign->columns.size() == 1U);
     CHECK(foreign->columns[0] == "account_id");
     REQUIRE(foreign->referenced_table.has_value());
-    CHECK(foreign->referenced_table->schema == "public");
-    CHECK(foreign->referenced_table->name == "accounts");
+    const auto referenced_table = foreign->referenced_table.value_or(postgresql::QualifiedName{});
+    CHECK(referenced_table.schema == "public");
+    CHECK(referenced_table.name == "accounts");
     REQUIRE(foreign->referenced_columns.size() == 1U);
     CHECK(foreign->referenced_columns[0] == "id");
     CHECK(foreign->definition.find("ON DELETE CASCADE") != std::string::npos);
@@ -400,7 +401,7 @@ CREATE POLICY sessions_visible
     REQUIRE(index->included_columns.size() == 1U);
     CHECK(index->included_columns[0] == "payload");
     REQUIRE(index->predicate.has_value());
-    first_index_predicate = *index->predicate;
+    first_index_predicate = index->predicate.value_or("");
     CHECK(first_index_predicate.find("deleted_at IS NULL") != std::string::npos);
 
     const auto* policy = find_policy(snapshot, "app", "sessions", "sessions_visible");
@@ -410,7 +411,7 @@ CREATE POLICY sessions_visible
     REQUIRE(policy->roles.size() == 1U);
     CHECK(policy->roles[0].public_role);
     REQUIRE(policy->using_expression.has_value());
-    first_policy_expression = *policy->using_expression;
+    first_policy_expression = policy->using_expression.value_or("");
     CHECK(first_policy_expression.find("deleted_at IS NULL") != std::string::npos);
     CHECK_FALSE(policy->check_expression.has_value());
   }
@@ -519,15 +520,17 @@ CREATE POLICY sessions_visible
     const auto* index = find_index(snapshot, "app", "sessions_lookup_idx");
     REQUIRE(index != nullptr);
     REQUIRE(index->predicate.has_value());
-    CHECK(*index->predicate != first_index_predicate);
-    CHECK(index->predicate->find("device_label IS NOT NULL") != std::string::npos);
+    const auto predicate = index->predicate.value_or("");
+    CHECK(predicate != first_index_predicate);
+    CHECK(predicate.find("device_label IS NOT NULL") != std::string::npos);
 
     const auto* policy = find_policy(snapshot, "app", "sessions", "sessions_visible");
     REQUIRE(policy != nullptr);
     CHECK_FALSE(policy->permissive);
     REQUIRE(policy->using_expression.has_value());
-    CHECK(*policy->using_expression != first_policy_expression);
-    CHECK(policy->using_expression->find("device_label IS NOT NULL") != std::string::npos);
+    const auto using_expression = policy->using_expression.value_or("");
+    CHECK(using_expression != first_policy_expression);
+    CHECK(using_expression.find("device_label IS NOT NULL") != std::string::npos);
   }
 
   expose_target = false;
