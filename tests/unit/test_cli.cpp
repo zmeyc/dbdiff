@@ -1,5 +1,6 @@
 #include "dbdiff/cli.hpp"
 #include "dbdiff/error.hpp"
+#include "dbdiff/version.hpp"
 
 #include "../test_support.hpp"
 
@@ -55,7 +56,7 @@ TEST_CASE("CLI help and version return success", "[unit][CLI-001]") {
 
   const auto version = invoke({"dbdiff", "--version"}, directory.path(), runtime());
   CHECK(version.status == 0);
-  CHECK(version.output.find("0.1.0") != std::string::npos);
+  CHECK(version.output == std::string{dbdiff::version()} + "\n");
 }
 
 TEST_CASE("CLI discovers configuration and validates hazards", "[unit][CLI-001][CFG-002]") {

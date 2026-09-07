@@ -19,7 +19,7 @@ dbdiff can be installed directly from an exact GitHub tag without publishing the
 npm registry:
 
 ```sh
-npm install --save-dev github:zmeyc/dbdiff#v0.1.0
+npm install --save-dev github:zmeyc/dbdiff#v0.1.1
 ```
 
 The resulting `package.json` entry is:
@@ -27,7 +27,7 @@ The resulting `package.json` entry is:
 ```json
 {
   "devDependencies": {
-    "@zmeyc/dbdiff": "github:zmeyc/dbdiff#v0.1.0"
+    "@zmeyc/dbdiff": "github:zmeyc/dbdiff#v0.1.1"
   }
 }
 ```

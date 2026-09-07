@@ -16,9 +16,10 @@ RUN apt-get update \
     && pip3 install --no-cache-dir cmake==3.31.6 \
     && find /var/lib/apt/lists -mindepth 1 -delete
 
+# Version overrides need historical port trees, so fetch the complete pinned history.
 RUN git init /opt/vcpkg \
     && git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
-    && git -C /opt/vcpkg fetch --depth 1 origin "${VCPKG_COMMIT}" \
+    && git -C /opt/vcpkg fetch origin "${VCPKG_COMMIT}" \
     && git -C /opt/vcpkg checkout --detach FETCH_HEAD \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
