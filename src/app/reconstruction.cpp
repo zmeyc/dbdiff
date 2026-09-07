@@ -86,10 +86,11 @@ AppliedPrefix validate_applied_history(const History& history,
     }
     validate_completed_prefix(completed_hashes, parsed);
 
-    if (entry.completed_file_sha256.has_value()) {
+    if (const auto completed_file_sha256 = entry.completed_file_sha256;
+        completed_file_sha256.has_value()) {
       if (saw_started || completed_hashes.size() != parsed.units.size() ||
-          *entry.completed_file_sha256 != migration.exact_sha256 ||
-          entry.attempted_file_sha256 != *entry.completed_file_sha256) {
+          *completed_file_sha256 != migration.exact_sha256 ||
+          entry.attempted_file_sha256 != *completed_file_sha256) {
         lifecycle_error(ErrorCode::migration, "completed migration '" + migration.metadata.version +
                                                   "' differs from its database checksum");
       }
