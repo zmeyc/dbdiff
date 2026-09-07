@@ -1,5 +1,8 @@
 # dbdiff
 
+> [!WARNING]
+> Do not use this project yet. It is still under development and is not production quality.
+
 `dbdiff` manages database schema changes from two version-controlled inputs:
 
 - an ordered directory of SQL migrations, which defines the last released state; and
