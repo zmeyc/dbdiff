@@ -58,11 +58,14 @@ if [[ ! -d "${VCPKG_ROOT}/.git" ]]; then
   mkdir -p "$(dirname "${VCPKG_ROOT}")"
   git init "${VCPKG_ROOT}"
   git -C "${VCPKG_ROOT}" remote add origin https://github.com/microsoft/vcpkg.git
-  git -C "${VCPKG_ROOT}" fetch --depth 1 origin "${VCPKG_COMMIT}"
+  git -C "${VCPKG_ROOT}" fetch origin "${VCPKG_COMMIT}"
   git -C "${VCPKG_ROOT}" checkout --detach FETCH_HEAD
 fi
 [[ "$(git -C "${VCPKG_ROOT}" rev-parse HEAD)" == "${VCPKG_COMMIT}" ]] \
   || fail "cached vcpkg checkout is not at ${VCPKG_COMMIT}"
+if [[ "$(git -C "${VCPKG_ROOT}" rev-parse --is-shallow-repository)" == "true" ]]; then
+  git -C "${VCPKG_ROOT}" fetch --unshallow origin "${VCPKG_COMMIT}"
+fi
 if [[ ! -x "${VCPKG_ROOT}/vcpkg" ]]; then
   "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
 fi

@@ -43,7 +43,7 @@ find_package(yaml-cpp 0.8 CONFIG REQUIRED)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 if(DBDIFF_DISTRIBUTION_BUILD)
-  find_package(libpqxx 8.0 CONFIG REQUIRED)
+  find_package(libpqxx 7.7 CONFIG REQUIRED)
   find_package(PostgreSQL 15 REQUIRED)
   find_package(unofficial-sqlite3 CONFIG REQUIRED)
   set(DBDIFF_PQXX_TARGET libpqxx::pqxx)

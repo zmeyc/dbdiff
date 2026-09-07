@@ -11,21 +11,23 @@ ENV VCPKG_FEATURE_FLAGS=manifests
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      binutils build-essential ca-certificates curl file git ninja-build perl pkg-config \
+      binutils bison build-essential ca-certificates curl file flex git ninja-build perl pkg-config \
       python3-pip sqlite3 tar unzip zip \
     && pip3 install --no-cache-dir cmake==3.31.6 \
     && find /var/lib/apt/lists -mindepth 1 -delete
 
 RUN git init /opt/vcpkg \
     && git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
-    && git -C /opt/vcpkg fetch --depth 1 origin "${VCPKG_COMMIT}" \
+    && git -C /opt/vcpkg fetch origin "${VCPKG_COMMIT}" \
     && git -C /opt/vcpkg checkout --detach FETCH_HEAD \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
 WORKDIR /src
 COPY . .
 
-RUN test -n "${TARGET_TRIPLET}" \
+RUN --mount=type=cache,target=/root/.cache/vcpkg,sharing=locked \
+    --mount=type=cache,id=dbdiff-vcpkg-downloads-${TARGET_TRIPLET},target=/opt/vcpkg/downloads,sharing=locked \
+    test -n "${TARGET_TRIPLET}" \
     && cmake -S . -B /build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTING=ON \
