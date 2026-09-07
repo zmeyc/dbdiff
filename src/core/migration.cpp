@@ -4,6 +4,7 @@
 #include "dbdiff/hash.hpp"
 #include "dbdiff/source.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
