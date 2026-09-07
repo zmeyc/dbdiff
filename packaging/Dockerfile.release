@@ -26,8 +26,9 @@ RUN git init /opt/vcpkg \
 WORKDIR /src
 COPY . .
 
+# Extracted host tools share directory names across architectures.
 RUN --mount=type=cache,target=/root/.cache/vcpkg,sharing=locked \
-    --mount=type=cache,target=/opt/vcpkg/downloads,sharing=locked \
+    --mount=type=cache,id=dbdiff-vcpkg-downloads-${TARGET_TRIPLET},target=/opt/vcpkg/downloads,sharing=locked \
     test -n "${TARGET_TRIPLET}" \
     && cmake -S . -B /build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
