@@ -9,5 +9,11 @@
     "openssl",
     "sqlite3",
     "yaml-cpp"
+  ],
+  "overrides": [
+    {
+      "name": "libpqxx",
+      "version": "7.10.5"
+    }
   ]
 }

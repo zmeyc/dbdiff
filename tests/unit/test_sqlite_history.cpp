@@ -292,3 +292,109 @@ TEST_CASE("SQLite online backup copies committed schema and WAL data", "[unit][s
     COMMIT;
   )sql"));
 }
+
+TEST_CASE("SQLite started unit classification fails closed on ambiguous schemas",
+          "[unit][sqlite][history]") {
+  using namespace dbdiff::sqlite;
+  MigrationUnitRecord unit;
+  unit.before_schema_sha256 = dbdiff::sha256_hex("before");
+  unit.after_schema_sha256 = dbdiff::sha256_hex("after");
+  CHECK(classify_started_unit(unit, unit.before_schema_sha256) == StartedUnitResolution::retry);
+  CHECK(classify_started_unit(unit, unit.after_schema_sha256) == StartedUnitResolution::complete);
+  CHECK_THROWS_AS(classify_started_unit(unit, dbdiff::sha256_hex("drift")), dbdiff::Error);
+  unit.explicit_transaction = true;
+  CHECK_THROWS_AS(classify_started_unit(unit, unit.before_schema_sha256), dbdiff::Error);
+  unit.explicit_transaction = false;
+  unit.after_schema_sha256 = unit.before_schema_sha256;
+  CHECK_THROWS_AS(classify_started_unit(unit, unit.before_schema_sha256), dbdiff::Error);
+}
+
+TEST_CASE("SQLite internal reads and backups preserve deferred foreign keys",
+          "[unit][sqlite][history][SQT-017]") {
+  auto source = dbdiff::sqlite::Database::temporary();
+  auto destination = dbdiff::sqlite::Database::temporary();
+  source.execute_source("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id "
+                        "INTEGER REFERENCES parent(id));");
+  const std::string empty;
+  static_cast<void>(source.apply_version("metadata", dbdiff::sha256_hex(empty), empty, false));
+  source.execute_migration("PRAGMA defer_foreign_keys=ON;");
+  destination.execute_migration("PRAGMA defer_foreign_keys=ON;");
+  CHECK(source.read_history().initialized);
+  CHECK_FALSE(source.recover_revisions("metadata").empty());
+  CHECK(source.inspect().tables.size() == 2U);
+  source.backup_to(destination);
+  const std::string deferred{
+      "BEGIN; INSERT INTO child VALUES(1); INSERT INTO parent VALUES(1); COMMIT;"};
+  CHECK_NOTHROW(source.execute_migration(deferred));
+  CHECK_NOTHROW(destination.execute_migration(deferred));
+}
+
+TEST_CASE("SQLite deferral survives bookkeeping and resets at completed SQL boundaries on resume",
+          "[unit][sqlite][history][SQT-017]") {
+  for (const std::string completed :
+       {"BEGIN; INSERT INTO child VALUES(1); INSERT INTO parent VALUES(1); COMMIT;",
+        "CREATE TABLE marker(id INTEGER);"}) {
+    INFO(completed);
+    auto database = dbdiff::sqlite::Database::temporary();
+    database.execute_source("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id "
+                            "INTEGER REFERENCES parent(id));");
+    const auto prefix = "PRAGMA defer_foreign_keys=ON;" + completed;
+    const std::string tail{
+        "BEGIN; INSERT INTO child VALUES(2); INSERT INTO parent VALUES(2); COMMIT;"};
+    const auto failed = prefix + tail;
+    CHECK_THROWS_AS(database.apply_version("deferral", dbdiff::sha256_hex(failed), failed, false),
+                    dbdiff::Error);
+    REQUIRE(database.read_history().entries.at(0).units.size() == 2U);
+    CHECK_THROWS_AS(database.apply_version("deferral", dbdiff::sha256_hex(failed), failed, true),
+                    dbdiff::Error);
+    REQUIRE(database.read_history().entries.at(0).units.size() == 2U);
+    auto repaired = prefix;
+    repaired.append("PRAGMA defer_foreign_keys=ON;");
+    repaired.append(tail);
+    CHECK_NOTHROW(database.apply_version("deferral", dbdiff::sha256_hex(repaired), repaired, true));
+    CHECK(database.read_history().entries.at(0).completed_file_sha256.has_value());
+  }
+}
+
+TEST_CASE("SQLite resume does not rerun completed foreign key checks against later data",
+          "[unit][sqlite][history][SQT-017]") {
+  auto database = dbdiff::sqlite::Database::temporary();
+  database.execute_source("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id "
+                          "INTEGER REFERENCES parent(id));");
+  const std::string prefix{"PRAGMA foreign_keys=OFF; PRAGMA foreign_key_check; BEGIN; INSERT INTO "
+                           "child VALUES(1); COMMIT;"};
+  const auto failed = prefix + "BEGIN; INSERT INTO missing_table VALUES(1); COMMIT;";
+  CHECK_THROWS_AS(database.apply_version("checked", dbdiff::sha256_hex(failed), failed, false),
+                  dbdiff::Error);
+  REQUIRE(database.read_history().entries.at(0).units.size() == 3U);
+  const auto repaired =
+      prefix + "BEGIN; INSERT INTO parent VALUES(1); COMMIT; PRAGMA foreign_keys=ON;";
+  CHECK_NOTHROW(database.apply_version("checked", dbdiff::sha256_hex(repaired), repaired, true));
+  CHECK_NOTHROW(database.execute_migration("PRAGMA foreign_key_check;"));
+}
+
+TEST_CASE("SQLite bookkeeping preserves schema-deferred foreign key violations until commit",
+          "[unit][sqlite][history][SQT-017]") {
+  auto database = dbdiff::sqlite::Database::temporary();
+  database.execute_source(R"sql(
+CREATE TABLE parent(id INTEGER PRIMARY KEY);
+CREATE TABLE child(id INTEGER PRIMARY KEY,
+                   parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+)sql");
+  const std::string failed{"BEGIN; INSERT INTO child(id,parent_id) VALUES(1,99); COMMIT;"};
+  CHECK_THROWS_AS(
+      database.apply_version("schema_deferred", dbdiff::sha256_hex(failed), failed, false),
+      dbdiff::Error);
+  const auto history = database.read_history();
+  REQUIRE(history.entries.size() == 1U);
+  CHECK(history.entries[0].units.empty());
+  CHECK_FALSE(history.entries[0].completed_file_sha256.has_value());
+  CHECK_NOTHROW(database.execute_migration("PRAGMA foreign_key_check;"));
+
+  const std::string repaired{"BEGIN; INSERT INTO child(id,parent_id) VALUES(1,99); "
+                             "INSERT INTO parent(id) VALUES(99); COMMIT;"};
+  CHECK_NOTHROW(
+      database.apply_version("schema_deferred", dbdiff::sha256_hex(repaired), repaired, true));
+  CHECK(database.read_history().entries[0].units.size() == 1U);
+  CHECK_NOTHROW(database.execute_migration("PRAGMA foreign_key_check;"));
+}

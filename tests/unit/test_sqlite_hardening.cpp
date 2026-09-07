@@ -9,11 +9,11 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 
 namespace {
 
@@ -32,6 +32,14 @@ public:
         static_cast<void>(sqlite3_close_v2(handle_));
         handle_ = nullptr;
       }
+      throw std::runtime_error{message};
+    }
+    // COMMIT may briefly wait for a contender's schema read in rollback-journal
+    // mode. Give the test's writer the same bounded busy handling as dbdiff.
+    if (sqlite3_busy_timeout(handle_, 5000) != SQLITE_OK) {
+      const std::string message{sqlite3_errmsg(handle_)};
+      static_cast<void>(sqlite3_close_v2(handle_));
+      handle_ = nullptr;
       throw std::runtime_error{message};
     }
   }
@@ -73,18 +81,24 @@ void require_writer_waits_safely(const std::filesystem::path& path,
   RawDatabase holder{path};
   holder.execute("PRAGMA journal_mode=" + std::string{journal_mode} + ";");
   holder.execute("CREATE TABLE seed(id INTEGER PRIMARY KEY, value TEXT);");
+  // Complete connection setup before introducing contention, so this test
+  // measures waiting for the write transaction rather than racing open/setup.
+  auto contender = dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write);
+  static_cast<void>(contender.inspect());
   holder.execute("BEGIN IMMEDIATE;");
   holder.execute("INSERT INTO seed(id,value) VALUES(1,'held writer');");
 
-  std::jthread release_writer{[&holder] {
-    std::this_thread::sleep_for(100ms);
-    holder.execute("COMMIT;");
-  }};
-
-  auto contender = dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write);
-  CHECK_NOTHROW(contender.execute_source("CREATE TABLE " + std::string{created_table} +
-                                         "(id INTEGER PRIMARY KEY);"));
-  release_writer.join();
+  const auto sql = "CREATE TABLE " + std::string{created_table} + "(id INTEGER PRIMARY KEY);";
+  std::promise<void> started;
+  auto ready = started.get_future();
+  auto completion = std::async(std::launch::async, [&] {
+    started.set_value();
+    contender.execute_source(sql);
+  });
+  ready.get();
+  CHECK(completion.wait_for(50ms) == std::future_status::timeout);
+  holder.execute("COMMIT;");
+  REQUIRE_NOTHROW(completion.get());
   CHECK(table_named(contender.inspect(), created_table).name == created_table);
 }
 

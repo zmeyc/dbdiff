@@ -43,7 +43,7 @@ find_package(yaml-cpp 0.8 CONFIG REQUIRED)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 if(DBDIFF_DISTRIBUTION_BUILD)
-  find_package(libpqxx 8.0 CONFIG REQUIRED)
+  find_package(libpqxx 7.7 CONFIG REQUIRED)
   find_package(PostgreSQL 15 REQUIRED)
   find_package(unofficial-sqlite3 CONFIG REQUIRED)
   set(DBDIFF_PQXX_TARGET libpqxx::pqxx)
@@ -58,6 +58,36 @@ else()
   set(DBDIFF_LIBPQ_TARGET PkgConfig::LIBPQ)
   set(DBDIFF_SQLITE_TARGET SQLite::SQLite3)
 endif()
+
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES ${DBDIFF_PQXX_TARGET})
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/src/postgresql")
+set(DBDIFF_PQXX_ABI_PROBE [[
+#include "pqxx.hpp"
+int main() {
+  pqxx::argument_error argument{"ABI probe"};
+  pqxx::conversion_error conversion{"ABI probe"};
+  pqxx::conversion_overrun overrun{"ABI probe"};
+  return argument.what()[0] + conversion.what()[0] + overrun.what()[0];
+}
+]])
+# Recheck when the installed headers or library change in an existing build tree.
+unset(DBDIFF_PQXX_ABI_LINKS CACHE)
+check_cxx_source_compiles("${DBDIFF_PQXX_ABI_PROBE}" DBDIFF_PQXX_ABI_LINKS)
+set(DBDIFF_PQXX_DISABLE_SOURCE_LOCATION OFF)
+if(NOT DBDIFF_PQXX_ABI_LINKS)
+  set(CMAKE_REQUIRED_DEFINITIONS -DDBDIFF_PQXX_DISABLE_SOURCE_LOCATION=1)
+  unset(DBDIFF_PQXX_LEGACY_ABI_LINKS CACHE)
+  check_cxx_source_compiles("${DBDIFF_PQXX_ABI_PROBE}" DBDIFF_PQXX_LEGACY_ABI_LINKS)
+  if(NOT DBDIFF_PQXX_LEGACY_ABI_LINKS)
+    message(FATAL_ERROR "libpqxx headers and library do not provide a compatible exception ABI")
+  endif()
+  set(DBDIFF_PQXX_DISABLE_SOURCE_LOCATION ON)
+  message(STATUS "Using libpqxx's pre-source_location exception ABI")
+endif()
+cmake_pop_check_state()
 
 if(TARGET yaml-cpp::yaml-cpp)
   set(DBDIFF_YAML_TARGET yaml-cpp::yaml-cpp)
@@ -88,22 +118,43 @@ target_link_libraries(dbdiff_core PUBLIC OpenSSL::Crypto ${DBDIFF_YAML_TARGET})
 dbdiff_set_warnings(dbdiff_core)
 dbdiff_enable_sanitizers(dbdiff_core)
 
-add_library(dbdiff_sqlite STATIC src/sqlite/backend.cpp)
+add_library(dbdiff_sqlite STATIC
+  src/sqlite/backend.cpp
+  src/sqlite/connection.cpp
+  src/sqlite/sql.cpp
+  src/sqlite/schema.cpp
+  src/sqlite/planner.cpp
+  src/sqlite/history.cpp)
 add_library(dbdiff::sqlite ALIAS dbdiff_sqlite)
 target_include_directories(dbdiff_sqlite PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(dbdiff_sqlite PUBLIC dbdiff_core ${DBDIFF_SQLITE_TARGET})
 dbdiff_set_warnings(dbdiff_sqlite)
 dbdiff_enable_sanitizers(dbdiff_sqlite)
 
-add_library(dbdiff_postgresql STATIC src/postgresql/backend.cpp)
+add_library(dbdiff_postgresql STATIC
+  src/postgresql/backend.cpp
+  src/postgresql/runtime.cpp
+  src/postgresql/sql.cpp
+  src/postgresql/schema.cpp
+  src/postgresql/planner.cpp
+  src/postgresql/history.cpp
+  src/postgresql/scratch.cpp)
 add_library(dbdiff::postgresql ALIAS dbdiff_postgresql)
 target_include_directories(dbdiff_postgresql PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(dbdiff_postgresql PUBLIC dbdiff_core ${DBDIFF_PQXX_TARGET}
                                          PRIVATE ${DBDIFF_LIBPQ_TARGET})
+if(DBDIFF_PQXX_DISABLE_SOURCE_LOCATION)
+  target_compile_definitions(dbdiff_postgresql PUBLIC DBDIFF_PQXX_DISABLE_SOURCE_LOCATION=1)
+endif()
 dbdiff_set_warnings(dbdiff_postgresql)
 dbdiff_enable_sanitizers(dbdiff_postgresql)
 
-add_library(dbdiff_app STATIC src/app/cli.cpp src/app/lifecycle.cpp)
+add_library(dbdiff_app STATIC
+  src/app/cli.cpp
+  src/app/lifecycle.cpp
+  src/app/project.cpp
+  src/app/reconstruction.cpp
+  src/app/status.cpp)
 add_library(dbdiff::app ALIAS dbdiff_app)
 target_include_directories(dbdiff_app PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(dbdiff_app PUBLIC dbdiff_core dbdiff_sqlite dbdiff_postgresql
@@ -130,6 +181,7 @@ find_program(DBDIFF_CLANG_FORMAT NAMES clang-format-18 clang-format)
 if(DBDIFF_CLANG_FORMAT)
   file(GLOB_RECURSE DBDIFF_FORMAT_FILES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+       "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
        "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
   add_custom_target(

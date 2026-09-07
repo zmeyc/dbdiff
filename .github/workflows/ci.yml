@@ -16,6 +16,22 @@ env:
   CTEST_OUTPUT_ON_FAILURE: "1"
 
 jobs:
+  npm:
+    name: npm wrapper (${{ matrix.os }}, Node 22)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test installer and launcher without postinstall
+        run: npm run test:npm
+
   build-test-format:
     name: Build, unit, SQLite, format, traceability
     runs-on: ubuntu-24.04

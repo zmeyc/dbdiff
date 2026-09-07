@@ -89,3 +89,37 @@ TEST_CASE("CLI reports missing configuration as an operational failure", "[unit]
   CHECK(result.status == 1);
   CHECK(result.error.find("no dbdiff.yaml") != std::string::npos);
 }
+
+TEST_CASE("CLI quick status identifies unchecked drift and preserves status exit codes",
+          "[unit][CLI-001][CLI-002][APP-007][APP-008]") {
+  dbdiff::test::TempDirectory directory;
+  directory.write("schema.sql", "CREATE TABLE items(id INTEGER PRIMARY KEY);\n");
+  directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: [schema.sql]
+migrations: migrations
+)yaml");
+  REQUIRE(invoke({"dbdiff", "create", "--name", "initial", "--allow-hazard", "WRITE_LOCK"},
+                 directory.path(), runtime())
+              .status == 0);
+  const auto missing = invoke({"dbdiff", "status", "--quick"}, directory.path(), runtime());
+  CHECK(missing.status == 2);
+  CHECK(missing.output.find("database is missing") != std::string::npos);
+  REQUIRE(invoke({"dbdiff", "apply", "--create-database"}, directory.path(), runtime()).status ==
+          0);
+  directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: [unavailable.sql]
+migrations: migrations
+)yaml");
+  const auto quick = invoke({"dbdiff", "status", "--quick"}, directory.path(), runtime());
+  CHECK(quick.status == 0);
+  CHECK(quick.output.find("history is up to date") != std::string::npos);
+  CHECK(quick.output.find("schema drift was not checked") != std::string::npos);
+  CHECK(quick.output.find("converged") == std::string::npos);
+  const auto verified = invoke({"dbdiff", "status"}, directory.path(), runtime());
+  CHECK(verified.status == 0);
+  CHECK(verified.output.find("schema matches its applied migrations") != std::string::npos);
+}

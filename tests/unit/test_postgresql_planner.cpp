@@ -1,6 +1,8 @@
 #include "dbdiff/error.hpp"
 #include "dbdiff/postgresql.hpp"
 
+#include "../../src/postgresql/internal.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -45,6 +47,49 @@ constexpr pg::ServerVersion pg15{150017, 15, 17};
 
 static_assert(std::is_move_constructible_v<pg::Database>);
 static_assert(!std::is_copy_constructible_v<pg::Database>);
+
+TEST_CASE("PostgreSQL index keys preserve the complete server definition",
+          "[unit][postgresql][scanner][planner][PG-015]") {
+  const auto keys = pg::detail::index_key_definitions(R"sql(
+CREATE INDEX "index(with, punctuation)" ON "public"."table(with, punctuation)" USING btree (
+  "name(with, punctuation)" COLLATE "C" text_pattern_ops DESC NULLS LAST,
+  lower(replace(name, ',', ')')),
+  (ARRAY[1, 2]),
+  id int4_minmax_multi_ops (values_per_range='64')
+) INCLUDE (payload) WHERE name <> ',)'
+)sql",
+                                                      4U);
+  REQUIRE(keys.size() == 4U);
+  CHECK(keys[0] == "\"name(with, punctuation)\" COLLATE \"C\" text_pattern_ops DESC NULLS LAST");
+  CHECK(keys[1] == "lower(replace(name, ',', ')'))");
+  CHECK(keys[2] == "(ARRAY[1, 2])");
+  CHECK(keys[3] == "id int4_minmax_multi_ops (values_per_range='64')");
+  CHECK(pg::detail::index_key_definitions(
+            "CREATE INDEX i ON t USING btree (f($tag$,)$tag$, E'\\\\,)', 'it''s,)'))", 1U)
+            .size() == 1U);
+  CHECK_THROWS_AS(pg::detail::index_key_definitions("CREATE INDEX i ON t (a, b)", 1U),
+                  dbdiff::Error);
+  CHECK_THROWS_AS(pg::detail::index_key_definitions("CREATE INDEX i ON t (a", 1U), dbdiff::Error);
+  CHECK_THROWS_AS(pg::detail::index_key_definitions("CREATE INDEX i ON t ()", 0U), dbdiff::Error);
+}
+
+TEST_CASE("PostgreSQL index decoration changes are hashed and replaced",
+          "[unit][postgresql][planner][hash][PG-015]") {
+  auto before = one_table({pg::Column{.position = 1, .name = "name", .type = "text"}});
+  before.indexes = {pg::Index{
+      .name = {"public", "items_idx"}, .table = {"public", "items"}, .key_expressions = {"name"}}};
+  for (const std::string key : {"name text_pattern_ops", "name COLLATE \"C\"",
+                                "name text_bloom_ops (false_positive_rate='0.02')"}) {
+    auto after = before;
+    after.indexes[0].key_expressions = {key};
+    CHECK(pg::semantic_hash(before) != pg::semantic_hash(after));
+    const auto migration = pg::plan(before, after);
+    CHECK_FALSE(migration.draft);
+    const auto sql = pg::render_plan(migration);
+    CHECK(sql.find("DROP INDEX") < sql.find("CREATE INDEX"));
+    CHECK(sql.find(key) != std::string::npos);
+  }
+}
 
 TEST_CASE("PostgreSQL scanner preserves dollar quoted bodies and exact boundaries",
           "[unit][postgresql][scanner][SQL-001]") {

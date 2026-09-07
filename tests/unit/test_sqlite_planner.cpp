@@ -1,3 +1,4 @@
+#include "dbdiff/error.hpp"
 #include "dbdiff/hazard.hpp"
 #include "dbdiff/sqlite.hpp"
 
@@ -169,7 +170,7 @@ TEST_CASE("SQLite planner rebuilds tables deterministically and preserves rows a
     CHECK(has_hazard(migration, dbdiff::Hazard::write_lock));
     CHECK_FALSE(has_hazard(migration, dbdiff::Hazard::rowid_reassignment));
     CHECK(migration.sql.starts_with("PRAGMA foreign_keys=OFF;\nBEGIN IMMEDIATE;\n"));
-    const auto insert = migration.sql.find("INSERT INTO");
+    const auto insert = migration.sql.find("INSERT OR ABORT INTO");
     REQUIRE(insert != std::string::npos);
     const auto insert_end = migration.sql.find('\n', insert);
     const auto insert_sql = migration.sql.substr(insert, insert_end - insert);
@@ -270,4 +271,54 @@ TEST_CASE("SQLite planner replaces changed indexes views and triggers",
   CHECK(migration.sql.find("CREATE VIEW values_view") != std::string::npos);
   CHECK(migration.sql.find("CREATE TRIGGER values_trigger") != std::string::npos);
   CHECK(dbdiff::sqlite::validate_plan(from, to));
+}
+
+TEST_CASE("SQLite rebuild copies abort instead of ignoring or replacing conflicting rows",
+          "[unit][sqlite][plan][SQT-003]") {
+  for (const std::string policy : {"IGNORE", "REPLACE"}) {
+    INFO(policy);
+    dbdiff::test::TempDirectory directory;
+    const auto path = directory.path() / "conflicts.sqlite";
+    auto database =
+        dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write_create);
+    database.execute_source("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);");
+    database.execute_migration("BEGIN; INSERT INTO items VALUES(1,'same'),(2,'same'); COMMIT;");
+    const auto before = database.inspect();
+    const auto desired =
+        snapshot("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT UNIQUE ON CONFLICT " +
+                 policy + ");");
+    const auto migration = dbdiff::sqlite::plan(before, desired);
+    CHECK_FALSE(migration.draft);
+    CHECK_THROWS_AS(database.execute_migration(migration.sql), dbdiff::Error);
+    CHECK(database.inspect().semantic_hash == before.semantic_hash);
+    CHECK(query_text(path, "SELECT group_concat(id || ':' || value, ',') FROM (SELECT * FROM items "
+                           "ORDER BY id);") == "1:same,2:same");
+  }
+}
+
+TEST_CASE("SQLite rebuild copies cannot replace NULL values with destination defaults",
+          "[unit][sqlite][plan][SQT-003]") {
+  dbdiff::test::TempDirectory directory;
+  const auto path = directory.path() / "null-conflict.sqlite";
+  auto database = dbdiff::sqlite::Database::open(path, dbdiff::sqlite::OpenMode::read_write_create);
+  database.execute_source("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);");
+  database.execute_migration("BEGIN; INSERT INTO items VALUES(1,NULL); COMMIT;");
+  const auto before = database.inspect();
+  const auto desired = snapshot("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL ON "
+                                "CONFLICT REPLACE DEFAULT 'replacement');");
+  CHECK_THROWS_AS(database.execute_migration(dbdiff::sqlite::plan(before, desired).sql),
+                  dbdiff::Error);
+  CHECK(database.inspect().semantic_hash == before.semantic_hash);
+  CHECK(query_text(path, "SELECT count(*) FROM items WHERE id=1 AND value IS NULL;") == "1");
+}
+
+TEST_CASE("SQLite quoted declaration names survive rebuild normalization",
+          "[unit][sqlite][plan][SQT-016]") {
+  for (const std::string name : {"key", "'single quoted'", "\"select\""}) {
+    INFO(name);
+    const auto from =
+        snapshot("CREATE TABLE " + name + "('id' INTEGER PRIMARY KEY, 'value' TEXT);");
+    const auto to = snapshot("CREATE TABLE " + name + "('value' TEXT, 'id' INTEGER PRIMARY KEY);");
+    CHECK(dbdiff::sqlite::validate_plan(from, to));
+  }
 }

@@ -6,6 +6,7 @@
 #include "../test_support.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <sqlite3.h>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -13,6 +14,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -48,6 +50,43 @@ sources:
   - schema
 migrations: migrations
 )yaml");
+}
+
+void execute_raw_sql(const std::filesystem::path& path, const std::string& sql) {
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
+  const auto close = [](sqlite3* database) { static_cast<void>(sqlite3_close_v2(database)); };
+  const std::unique_ptr<sqlite3, decltype(close)> connection{raw, close};
+  REQUIRE(sqlite3_exec(connection.get(), sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+}
+
+std::string query_raw_text(const std::filesystem::path& path, const std::string& sql) {
+  sqlite3* raw = nullptr;
+  const auto opened = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+  const auto close = [](sqlite3* database) { static_cast<void>(sqlite3_close_v2(database)); };
+  const std::unique_ptr<sqlite3, decltype(close)> connection{raw, close};
+  REQUIRE(opened == SQLITE_OK);
+  sqlite3_stmt* prepared = nullptr;
+  const auto status = sqlite3_prepare_v2(connection.get(), sql.c_str(), -1, &prepared, nullptr);
+  const auto finalize = [](sqlite3_stmt* statement) {
+    static_cast<void>(sqlite3_finalize(statement));
+  };
+  const std::unique_ptr<sqlite3_stmt, decltype(finalize)> statement{prepared, finalize};
+  REQUIRE(status == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement.get()) == SQLITE_ROW);
+  const auto* value = sqlite3_column_text(statement.get(), 0);
+  REQUIRE(value != nullptr);
+  const std::string result{reinterpret_cast<const char*>(value)};
+  REQUIRE(sqlite3_step(statement.get()) == SQLITE_DONE);
+  return result;
+}
+
+dbdiff::Runtime local_runtime() {
+  return dbdiff::Runtime{
+      .environment = [](std::string_view) { return std::optional<std::string>{}; },
+      .stdin_reader = []() -> std::string { throw std::runtime_error{"stdin must not be read"}; },
+      .now = [] { return std::chrono::system_clock::time_point{}; },
+  };
 }
 
 class ScopedFileLock final {
@@ -301,6 +340,67 @@ CREATE TABLE items(
   CHECK(dbdiff::project_status(config, runtime).status == dbdiff::ProjectStatus::converged);
 }
 
+TEST_CASE("SQLite data validation preserves duplicate rows and history for IGNORE and REPLACE",
+          "[unit][APP-005][SQT-003][SQT-006]") {
+  for (const std::string policy : {"IGNORE", "REPLACE"}) {
+    INFO(policy);
+    dbdiff::test::TempDirectory directory;
+    const auto database_path = directory.path() / "data.sqlite";
+    const auto config = directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:data.sqlite
+sources: [schema.sql]
+migrations: migrations
+)yaml");
+    directory.write("schema.sql", "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);\n");
+    const auto runtime = local_runtime();
+    const auto initial = dbdiff::create_migration(
+        dbdiff::CreateOptions{config, "initial", {dbdiff::Hazard::write_lock}}, runtime);
+    REQUIRE(initial.created);
+    REQUIRE(dbdiff::apply_migrations(
+                dbdiff::ApplyOptions{.config_file = config, .create_database = true}, runtime)
+                .applied == 1U);
+    execute_raw_sql(database_path,
+                    "INSERT INTO items(id,value) VALUES(1,'same'),(2,'same'),(3,'distinct');");
+    const auto rows = [&] {
+      return query_raw_text(database_path, "SELECT group_concat(id || ':' || value, ',') "
+                                           "FROM (SELECT id, value FROM items ORDER BY id);");
+    };
+    const auto before_rows = rows();
+    REQUIRE(before_rows == "1:same,2:same,3:distinct");
+    const auto before =
+        dbdiff::sqlite::Database::open(database_path, dbdiff::sqlite::OpenMode::read_only);
+    const auto before_schema = before.inspect().semantic_hash;
+    const auto before_history = before.read_history();
+    const auto before_revisions = before.recover_revisions(initial.version);
+
+    directory.write("schema.sql",
+                    "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT UNIQUE ON CONFLICT " +
+                        policy + ");\n");
+    const auto changed = dbdiff::create_migration(
+        dbdiff::CreateOptions{config,
+                              "constrain values",
+                              {dbdiff::Hazard::table_rewrite, dbdiff::Hazard::constraint_scan,
+                               dbdiff::Hazard::write_lock}},
+        runtime);
+    REQUIRE(changed.created);
+    REQUIRE_FALSE(changed.draft);
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{.config_file = config, .validate_data = true},
+                                 runtime),
+        dbdiff::Error);
+
+    CHECK(rows() == before_rows);
+    const auto after =
+        dbdiff::sqlite::Database::open(database_path, dbdiff::sqlite::OpenMode::read_only);
+    CHECK(after.inspect().semantic_hash == before_schema);
+    CHECK(after.read_history() == before_history);
+    CHECK(after.recover_revisions(initial.version) == before_revisions);
+    CHECK(after.recover_revisions(changed.version).empty());
+    CHECK(dbdiff::project_status(config, runtime).status == dbdiff::ProjectStatus::pending);
+  }
+}
+
 TEST_CASE("SQLite lifecycle resumes only an edited incomplete suffix",
           "[unit][MIG-002][MIG-003][MIG-004][SQL-003][APP-006][OPS-001]") {
   dbdiff::test::TempDirectory directory;
@@ -377,4 +477,206 @@ COMMIT;
   REQUIRE(revisions.size() == 2U);
   CHECK(revisions[0].sql == failed);
   CHECK(revisions[1].sql == repaired);
+}
+
+TEST_CASE("SQLite lifecycle reconciles an interrupted standalone unit without status writes",
+          "[unit][APP-006][APP-007][MIG-003]") {
+  dbdiff::test::TempDirectory directory;
+  directory.write("schema.sql",
+                  "CREATE TABLE alpha(id INTEGER);\nCREATE TABLE beta(id INTEGER);\n");
+  const auto config = directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: [schema.sql]
+migrations: migrations
+)yaml");
+  const auto runtime = local_runtime();
+  const auto migration = dbdiff::create_migration(
+      dbdiff::CreateOptions{config, "initial", {dbdiff::Hazard::write_lock}}, runtime);
+  auto sql = dbdiff::load_migration(migration.file, dbdiff::BackendKind::sqlite).sql;
+  const auto begin = sql.find("BEGIN IMMEDIATE;\n");
+  REQUIRE(begin != std::string::npos);
+  sql.erase(begin, std::string{"BEGIN IMMEDIATE;\n"}.size());
+  const auto commit = sql.find("COMMIT;\n");
+  REQUIRE(commit != std::string::npos);
+  sql.erase(commit, std::string{"COMMIT;\n"}.size());
+  directory.write(migration.file, sql);
+  static_cast<void>(
+      dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, true, false, false}, runtime));
+  const auto target_path = directory.path() / "live.sqlite";
+  execute_raw_sql(target_path,
+                  "UPDATE _dbdiff_migrations SET completed_file_sha256=NULL;"
+                  "UPDATE _dbdiff_migration_units SET state='started' WHERE ordinal=1;");
+  const auto read_history = [&] {
+    return dbdiff::sqlite::Database::open(target_path, dbdiff::sqlite::OpenMode::read_only)
+        .read_history();
+  };
+  REQUIRE(read_history().entries[0].units.size() == 2U);
+
+  SECTION("already applied standalone DDL is acknowledged without executing it again") {
+    const auto history = read_history();
+    const auto revisions = dbdiff::recover_migration({config, migration.version, true}, runtime);
+    const auto status = dbdiff::project_status(config, runtime);
+    CHECK(status.status == dbdiff::ProjectStatus::pending);
+    CHECK(status.drift_checked);
+    CHECK(read_history() == history);
+    const auto dry_run =
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, true, false, true, true}, runtime);
+    CHECK(dry_run.pending == 1U);
+    CHECK(read_history() == history);
+    CHECK(dbdiff::recover_migration({config, migration.version, true}, runtime).size() ==
+          revisions.size());
+    const auto applied =
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, false, true}, runtime);
+    CHECK(applied.applied == 1U);
+    CHECK(dbdiff::project_status(config, runtime).status == dbdiff::ProjectStatus::converged);
+  }
+
+  SECTION("unexecuted standalone suffix can be edited and retried") {
+    execute_raw_sql(target_path, "DROP TABLE beta;");
+    const auto position = sql.find("CREATE TABLE beta");
+    REQUIRE(position != std::string::npos);
+    sql.replace(position, std::string{"CREATE TABLE beta"}.size(), "CREATE  TABLE beta");
+    directory.write(migration.file, sql);
+    const auto history = read_history();
+    CHECK(dbdiff::project_status(config, runtime).status == dbdiff::ProjectStatus::pending);
+    CHECK(read_history() == history);
+    CHECK(dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, true, true}, runtime)
+              .applied == 1U);
+  }
+
+  SECTION("a possibly applied standalone unit cannot be edited") {
+    const auto position = sql.find("CREATE TABLE beta");
+    REQUIRE(position != std::string::npos);
+    sql.replace(position, std::string{"CREATE TABLE beta"}.size(), "CREATE  TABLE beta");
+    directory.write(migration.file, sql);
+    const auto history = read_history();
+    CHECK_THROWS_AS(dbdiff::project_status(config, runtime), dbdiff::Error);
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, false, true}, runtime),
+        dbdiff::Error);
+    CHECK(read_history() == history);
+  }
+
+  SECTION("completed prefix bytes remain immutable during standalone reconciliation") {
+    const auto position = sql.find("CREATE TABLE alpha");
+    REQUIRE(position != std::string::npos);
+    sql.replace(position, std::string{"CREATE TABLE alpha"}.size(), "CREATE  TABLE alpha");
+    directory.write(migration.file, sql);
+    const auto history = read_history();
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, false, true}, runtime),
+        dbdiff::Error);
+    CHECK(read_history() == history);
+  }
+
+  SECTION("indistinguishable checkpoints remain unsafe") {
+    execute_raw_sql(target_path,
+                    "UPDATE _dbdiff_migration_units SET after_schema_sha256=before_schema_sha256 "
+                    "WHERE ordinal=1;");
+    const auto history = read_history();
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, false, true}, runtime),
+        dbdiff::Error);
+    CHECK(read_history() == history);
+  }
+
+  SECTION("unrelated schema drift is not accepted as a completed standalone unit") {
+    execute_raw_sql(target_path, "CREATE TABLE unrelated(id INTEGER);");
+    const auto history = read_history();
+    CHECK_THROWS_AS(
+        dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, false, false, true}, runtime),
+        dbdiff::Error);
+    CHECK(read_history() == history);
+  }
+}
+
+TEST_CASE(
+    "SQLite status verifies only the applied prefix and quick status never claims drift checks",
+    "[unit][APP-007][APP-008]") {
+  dbdiff::test::TempDirectory directory;
+  directory.write("schema.sql", "CREATE TABLE items(id INTEGER PRIMARY KEY);\n");
+  const auto config = directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: [schema.sql]
+migrations: migrations
+)yaml");
+  const auto runtime = local_runtime();
+  const auto migration = dbdiff::create_migration(
+      dbdiff::CreateOptions{config, "initial", {dbdiff::Hazard::write_lock}}, runtime);
+  static_cast<void>(
+      dbdiff::apply_migrations(dbdiff::ApplyOptions{config, false, true, false, false}, runtime));
+  directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: [unavailable.sql, stdin]
+migrations: migrations
+)yaml");
+  const auto target_path = directory.path() / "live.sqlite";
+  const auto original_history =
+      dbdiff::sqlite::Database::open(target_path, dbdiff::sqlite::OpenMode::read_only)
+          .read_history();
+
+  SECTION("unavailable sources do not prevent verified or quick status") {
+    const auto verified = dbdiff::project_status(config, runtime);
+    CHECK(verified.status == dbdiff::ProjectStatus::converged);
+    CHECK(verified.drift_checked);
+    const auto quick = dbdiff::project_status(dbdiff::StatusOptions{config, true}, runtime);
+    CHECK(quick.status == dbdiff::ProjectStatus::history_up_to_date);
+    CHECK_FALSE(quick.drift_checked);
+    CHECK(quick.detail.find("schema drift was not checked") != std::string::npos);
+    CHECK_THROWS_AS(dbdiff::apply_migrations({config, true, false, false, false}, runtime),
+                    dbdiff::Error);
+  }
+
+  SECTION("status never consumes a configured stdin source") {
+    directory.write("dbdiff.yaml", R"yaml(format: 1
+backend: sqlite
+database: sqlite:live.sqlite
+sources: ["-"]
+migrations: migrations
+)yaml");
+    CHECK(dbdiff::project_status(config, runtime).status == dbdiff::ProjectStatus::converged);
+    CHECK(dbdiff::project_status(dbdiff::StatusOptions{config, true}, runtime).status ==
+          dbdiff::ProjectStatus::history_up_to_date);
+  }
+
+  SECTION("pending SQL is not executed and draft migrations are counted") {
+    auto metadata = dbdiff::load_migration(migration.file, dbdiff::BackendKind::sqlite).metadata;
+    metadata.version = "19700101000001_pending";
+    metadata.from_sha256 = metadata.to_sha256;
+    metadata.draft = true;
+    directory.write("migrations/" + metadata.version + ".sql",
+                    dbdiff::render_migration_metadata(metadata) +
+                        "BEGIN; INSERT INTO missing_table VALUES(1); COMMIT;\n");
+    const auto verified = dbdiff::project_status(config, runtime);
+    CHECK(verified.status == dbdiff::ProjectStatus::pending);
+    CHECK(verified.applied == 1U);
+    CHECK(verified.total == 2U);
+    CHECK(verified.drift_checked);
+    const auto quick = dbdiff::project_status(dbdiff::StatusOptions{config, true}, runtime);
+    CHECK(quick.status == dbdiff::ProjectStatus::pending);
+    CHECK_FALSE(quick.drift_checked);
+  }
+
+  SECTION("quick mode cannot claim convergence even when live schema has drifted") {
+    execute_raw_sql(target_path, "CREATE TABLE unrecorded(id INTEGER);");
+    const auto verified = dbdiff::project_status(config, runtime);
+    CHECK(verified.status == dbdiff::ProjectStatus::drift);
+    CHECK(verified.drift_checked);
+    const auto quick = dbdiff::project_status(dbdiff::StatusOptions{config, true}, runtime);
+    CHECK(quick.status == dbdiff::ProjectStatus::history_up_to_date);
+    CHECK_FALSE(quick.drift_checked);
+  }
+
+  SECTION("quick mode rejects changed completed file bytes") {
+    const auto original = dbdiff::load_migration(migration.file, dbdiff::BackendKind::sqlite).sql;
+    directory.write(migration.file, original + "-- changed\n");
+    CHECK_THROWS_AS(dbdiff::project_status(dbdiff::StatusOptions{config, true}, runtime),
+                    dbdiff::Error);
+  }
+
+  CHECK(dbdiff::sqlite::Database::open(target_path, dbdiff::sqlite::OpenMode::read_only)
+            .read_history() == original_history);
 }

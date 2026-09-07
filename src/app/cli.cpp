@@ -76,7 +76,11 @@ int run_cli(const int argc, char** argv, std::ostream& output, std::ostream& err
                   "Validate a copy of live SQLite data before writing");
   apply->add_flag("--resume", resume, "Resume an incomplete migration revision");
 
-  auto* status = app.add_subcommand("status", "Report convergence, pending work, or drift");
+  bool quick_status = false;
+  auto* status = app.add_subcommand("status", "Verify the applied schema and report pending work");
+  status->add_flag(
+      "--quick", quick_status,
+      "Check migration history without checking schema drift or using scratch databases");
 
   std::string recover_version;
   bool list_revisions = false;
@@ -116,9 +120,12 @@ int run_cli(const int argc, char** argv, std::ostream& output, std::ostream& err
       return 0;
     }
     if (*status) {
-      const auto result = project_status(config, runtime);
+      const auto result = project_status(StatusOptions{config, quick_status}, runtime);
       output << result.detail << '\n';
-      return result.status == ProjectStatus::converged ? 0 : 2;
+      return result.status == ProjectStatus::converged ||
+                     result.status == ProjectStatus::history_up_to_date
+                 ? 0
+                 : 2;
     }
     if (*recover) {
       const auto revisions =

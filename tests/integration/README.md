@@ -5,7 +5,8 @@
 `cli_lifecycle.sh` is a local end-to-end shell harness for the public `create`, `apply`, `status`,
 and `recover` commands. It verifies exact `-- dbdiff: key=value` metadata, visible transaction
 boundaries, direct use of `config.migrations`, split declarative source files, target isolation during
-`create`, dry-run behavior, application, recovery, and no-op convergence.
+`create`, dry-run behavior, application, recovery, and no-op convergence. Verified and `--quick`
+status also work when declarative sources are missing; quick output identifies unchecked drift.
 
 Run it directly against a built executable:
 
@@ -28,6 +29,11 @@ from split declarative sources. The schemas exercise PK/UNIQUE/CHECK/FK constrai
 and partial `NULLS NOT DISTINCT` index with `INCLUDE`, and a PUBLIC row-security policy. The second
 migration checks dependency ordering and the final no-op creation proves history-to-master
 convergence before deliberate live drift is rejected.
+
+A second lifecycle case exercises index operator classes, per-key collations, and operator-class
+parameters. Independent catalog queries verify the generated indexes after creation and replacement,
+and an operator-class-only change must report drift. The case also checks verified status with absent
+sources and invalid pending SQL, plus quick status with unavailable scratch provisioning.
 
 ## Docker scratch ownership integration
 

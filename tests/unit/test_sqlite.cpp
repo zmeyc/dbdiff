@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -201,4 +202,24 @@ TEST_CASE("SQLite databases can be reopened read-only for inspection", "[unit][s
   REQUIRE(database.inspect().tables.size() == 1U);
   CHECK(table_named(database.inspect(), "persistent").name == "persistent");
   CHECK_THROWS_AS(database.execute_migration("CREATE TABLE forbidden(id INTEGER);"), dbdiff::Error);
+}
+
+TEST_CASE("SQLite fingerprints preserve quoted expression semantics", "[unit][sqlite][SQT-016]") {
+  const std::string table{R"sql(CREATE TABLE items("null" TEXT, "1" INTEGER);)sql"};
+  for (const auto& expressions : {std::pair{std::string{"\"null\""}, std::string{"NULL"}},
+                                  std::pair{std::string{"\"1\""}, std::string{"1"}},
+                                  std::pair{std::string{"\"Hello\""}, std::string{"\"hello\""}}}) {
+    INFO(expressions.first << " versus " << expressions.second);
+    auto first = dbdiff::sqlite::Database::temporary();
+    auto second = dbdiff::sqlite::Database::temporary();
+    first.execute_source(table + "CREATE VIEW values_view AS SELECT " + expressions.first +
+                         " AS value FROM items;");
+    second.execute_source(table + "CREATE VIEW values_view AS SELECT " + expressions.second +
+                          " AS value FROM items;");
+    const auto before = first.inspect();
+    const auto after = second.inspect();
+    CHECK(before.semantic_hash != after.semantic_hash);
+    CHECK_FALSE(dbdiff::sqlite::plan(before, after).sql.empty());
+    CHECK(dbdiff::sqlite::validate_plan(before, after));
+  }
 }

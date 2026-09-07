@@ -59,6 +59,8 @@ MIG-002	unit	SQLite failed migrations preserve an immutable prefix and exact rev
 MIG-002	unit	PostgreSQL uncertain standalone units fail closed
 MIG-003	unit	a completed execution prefix cannot be edited
 MIG-003	unit	SQLite standalone DDL can resume from an edited incomplete suffix
+MIG-003	unit	SQLite lifecycle reconciles an interrupted standalone unit without status writes
+MIG-002	unit	SQLite started unit classification fails closed on ambiguous schemas
 MIG-003	unit	PostgreSQL completed unit bytes and boundaries are immutable
 MIG-004	unit	SQLite failed migrations preserve an immutable prefix and exact revisions
 MIG-004	unit	PostgreSQL history value objects retain exact recoverable revisions
@@ -83,21 +85,34 @@ APP-004	unit	all lifecycle entry points honor the bounded project lock
 APP-004	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 APP-005	unit	SQLite apply, status, drift, and recover use only database-recorded history
 APP-005	unit	SQLite data validation uses an online copy and never mutates the target on failure
+APP-005	unit	SQLite data validation preserves duplicate rows and history for IGNORE and REPLACE
 APP-005	integration	dbdiff_cli_lifecycle_integration
 APP-006	unit	SQLite apply, status, drift, and recover use only database-recorded history
 APP-006	unit	SQLite databases can be reopened read-only for inspection
 APP-006	integration	dbdiff_cli_lifecycle_integration
+APP-006	unit	SQLite lifecycle reconciles an interrupted standalone unit without status writes
+APP-007	unit	SQLite status verifies only the applied prefix and quick status never claims drift checks
+APP-007	integration	dbdiff_cli_lifecycle_integration
+APP-007	integration	integration.postgresql.lifecycle.PostgreSQL indexes preserve operator classes collations and parameters
+APP-008	unit	CLI quick status identifies unchecked drift and preserves status exit codes
+APP-008	unit	SQLite status verifies only the applied prefix and quick status never claims drift checks
+APP-008	integration	dbdiff_cli_lifecycle_integration
+APP-008	integration	integration.postgresql.lifecycle.PostgreSQL indexes preserve operator classes collations and parameters
 SQT-001	unit	SQLite planner creates and drops complete schema object sets
 SQT-001	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-002	unit	SQLite planner appends columns without rebuilding a table
 SQT-003	unit	SQLite planner rebuilds tables deterministically and preserves rows and sequences
 SQT-003	unit	SQLite planner preserves accessible rowids and reports inaccessible ones
+SQT-003	unit	SQLite rebuild copies abort instead of ignoring or replacing conflicting rows
+SQT-003	unit	SQLite rebuild copies cannot replace NULL values with destination defaults
+SQT-003	unit	SQLite data validation preserves duplicate rows and history for IGNORE and REPLACE
 SQT-003	manual	003_sqlite_rebuild_preserves_data
 SQT-004	unit	SQLite rejects unsafe schema scopes before committed work can escape
 SQT-004	unit	SQLite rejects virtual and unrecognized reserved target objects
 SQT-004	unit	SQLite opens only plain persistent non-symlink paths
 SQT-005	unit	SQLite busy handling serializes rollback-journal and WAL writers
 SQT-006	unit	SQLite data validation uses an online copy and never mutates the target on failure
+SQT-006	unit	SQLite data validation preserves duplicate rows and history for IGNORE and REPLACE
 SQT-010	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-011	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-012	unit	SQLite rich schemas survive semantic render and reconstruction
@@ -107,6 +122,12 @@ SQT-014	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-014	unit	SQLite planner replaces changed indexes views and triggers
 SQT-015	unit	SQLite rich schemas survive semantic render and reconstruction
 SQT-015	unit	SQLite planner replaces changed indexes views and triggers
+SQT-016	unit	SQLite fingerprints preserve quoted expression semantics
+SQT-016	unit	SQLite quoted declaration names survive rebuild normalization
+SQT-017	unit	SQLite internal reads and backups preserve deferred foreign keys
+SQT-017	unit	SQLite deferral survives bookkeeping and resets at completed SQL boundaries on resume
+SQT-017	unit	SQLite resume does not rerun completed foreign key checks against later data
+SQT-017	unit	SQLite bookkeeping preserves schema-deferred foreign key violations until commit
 PG-001	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-001	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 PG-001	manual	010_postgresql_initial
@@ -135,6 +156,9 @@ PG-014	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isol
 PG-014	manual	010_postgresql_initial
 PG-015	unit	PostgreSQL relational objects have deterministic semantic identities
 PG-015	unit	PostgreSQL planner creates keys advanced indexes cyclic foreign keys and policies
+PG-015	unit	PostgreSQL index keys preserve the complete server definition
+PG-015	unit	PostgreSQL index decoration changes are hashed and replaced
+PG-015	integration	integration.postgresql.lifecycle.PostgreSQL indexes preserve operator classes collations and parameters
 PG-015	integration	integration.postgresql.lifecycle.PostgreSQL lifecycle is isolated, dry-run safe, recoverable, and drift gated
 PG-015	manual	010_postgresql_initial
 PG-020	unit	PostgreSQL relational objects have deterministic semantic identities

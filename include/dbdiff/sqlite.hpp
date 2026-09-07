@@ -129,6 +129,13 @@ struct MigrationUnitRecord {
   bool operator==(const MigrationUnitRecord&) const = default;
 };
 
+enum class StartedUnitResolution { retry, complete };
+
+// Classifies schema state only; callers must validate the exact SQL and transaction
+// shape before accepting an already-applied unit as complete.
+[[nodiscard]] StartedUnitResolution classify_started_unit(const MigrationUnitRecord& unit,
+                                                          std::string_view current_schema_sha256);
+
 struct MigrationHistoryEntry {
   std::string version;
   std::string backend;

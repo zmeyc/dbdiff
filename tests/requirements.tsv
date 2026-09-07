@@ -35,6 +35,8 @@ APP-003	apply	supported	unit+integration	Live drift blocks apply and is never co
 APP-004	apply	supported	unit+integration	A cooperative project lock spans every lifecycle command and a PostgreSQL target lock spans history drift validation repeated pre-write validation and live writes
 APP-005	apply	supported	unit+integration	Dry-run and failed data validation write neither target schema nor migration history
 APP-006	apply	supported	unit+integration	Status missing-target creation read-only inspection and exact revision recovery are available through the lifecycle
+APP-007	status	supported	unit+integration	Verified status reconstructs only the applied prefix without resolving declarative sources or executing pending migrations
+APP-008	status	supported	unit+integration	Quick status reports recorded migration state without scratch provisioning or claiming drift verification
 SQT-001	sqlite	supported	unit	Managed SQLite tables indexes views and triggers create drop render and reconstruct to the same semantic snapshot
 SQT-002	sqlite	supported	unit	Supported column additions use native ALTER TABLE without a table rebuild
 SQT-003	sqlite	supported	unit	Transactional rebuilds preserve mapped data accessible rowids sequence state and dependents
@@ -48,6 +50,9 @@ SQT-012	sqlite	supported	unit	Primary unique check and foreign-key constraint pr
 SQT-013	sqlite	supported	unit	AUTOINCREMENT sequence state and accessible rowids are preserved across rebuilds
 SQT-014	sqlite	supported	unit	Expression partial ordered collated and unique index definitions round-trip
 SQT-015	sqlite	supported	unit	View definitions and multi-statement trigger bodies round-trip
+SQT-016	sqlite	supported	unit	Schema normalization distinguishes quoted expressions from keywords numeric literals and differently cased double-quoted strings
+SQT-017	sqlite	supported	unit	Internal bookkeeping preserves deferred foreign keys while user transaction boundaries retain native reset behavior
+SQT-018	sqlite	planned	-	Schema-wide foreign-key checks have identical session effects with and without dbdiff metadata when the managed schema has no foreign keys
 PG-001	postgresql	supported	unit+integration	Relational snapshots give stable semantic identities to modeled schemas tables columns constraints indexes and policies
 PG-002	postgresql	supported	unit+integration	Modeled relational objects create change and drop with deterministic dependency-ordered SQL plans
 PG-003	postgresql	planned	-	Online phases and transaction-forbidden statements retain explicit valid migration boundaries
@@ -59,7 +64,7 @@ PG-011	postgresql	planned	-	Enum labels and complete domain definitions round-tr
 PG-012	postgresql	planned	-	Standalone sequence properties and ownership relationships round-trip
 PG-013	postgresql	supported	unit+integration	Modeled ordinary table column default nullability and identity-mode properties plan and normalize
 PG-014	postgresql	supported	unit+integration	Primary unique check and foreign-key constraints have stable identities and dependency-aware plans
-PG-015	postgresql	supported	unit+integration	Expression partial INCLUDE uniqueness null-distinctness and method index properties have stable identities and plans
+PG-015	postgresql	supported	unit+integration	Expression partial INCLUDE uniqueness null-distinctness method operator-class parameter and collation index properties have stable identities and plans
 PG-016	postgresql	planned	-	View definitions and all managed security options round-trip
 PG-017	postgresql	planned	-	Materialized-view definitions and population state round-trip
 PG-018	postgresql	planned	-	Functions and procedures preserve identity language body and managed attributes

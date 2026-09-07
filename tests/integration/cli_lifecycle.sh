@@ -161,6 +161,18 @@ run_ok "apply initial migration" \
 run_ok "status after initial apply" \
   "${DBDIFF_CLI_BIN}" --config "${project}/dbdiff.yaml" status
 
+run_ok "quick status after initial apply" \
+  "${DBDIFF_CLI_BIN}" --config "${project}/dbdiff.yaml" status --quick
+grep -Fq -- 'schema drift was not checked' "${DBDIFF_CLI_LAST_LOG}" ||
+  fail "quick status did not disclose that drift was not checked"
+
+mv "${project}/schema/dbdiff.schema" "${project}/schema/unavailable.manifest"
+run_ok "verified status without declarative sources" \
+  "${DBDIFF_CLI_BIN}" --config "${project}/dbdiff.yaml" status
+run_ok "quick status without declarative sources" \
+  "${DBDIFF_CLI_BIN}" --config "${project}/dbdiff.yaml" status --quick
+mv "${project}/schema/unavailable.manifest" "${project}/schema/dbdiff.schema"
+
 version="$(basename -- "${migration}" .sql)"
 recovered="${DBDIFF_CLI_RUN_ROOT}/recovered.sql"
 if ! "${DBDIFF_CLI_BIN}" --config "${project}/dbdiff.yaml" recover "${version}" \

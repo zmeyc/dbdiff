@@ -1,442 +1,26 @@
 #include "dbdiff/lifecycle.hpp"
 
-#include "dbdiff/docker.hpp"
-#include "dbdiff/error.hpp"
-#include "dbdiff/migration.hpp"
-#include "dbdiff/postgresql.hpp"
-#include "dbdiff/script.hpp"
-#include "dbdiff/sqlite.hpp"
+#include "project.hpp"
 
 #include <sqlite3.h>
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <unistd.h>
-
-#include <algorithm>
 #include <array>
 #include <cctype>
-#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
-#include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
 namespace dbdiff {
+using namespace app_detail;
 namespace {
-
-struct ProjectInputs {
-  Config config;
-  SourceSet sources;
-  std::vector<MigrationFile> migrations;
-};
-
-[[noreturn]] void lifecycle_error(const ErrorCode code, const std::string& message) {
-  throw Error{code, message};
-}
-
-class ProjectLifecycleLock final {
-public:
-  ProjectLifecycleLock(const std::filesystem::path& config_file,
-                       const std::chrono::milliseconds timeout) {
-    descriptor_ = ::open(config_file.c_str(), O_RDONLY | O_CLOEXEC);
-    if (descriptor_ == -1) {
-      lifecycle_error(ErrorCode::configuration,
-                      "cannot open configuration file for lifecycle locking");
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    constexpr auto poll_interval = std::chrono::milliseconds{10};
-    while (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
-      const auto lock_error = errno;
-      if (lock_error != EWOULDBLOCK && lock_error != EAGAIN && lock_error != EINTR) {
-        close_descriptor();
-        lifecycle_error(ErrorCode::database, "project lifecycle lock acquisition failed");
-      }
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= deadline) {
-        close_descriptor();
-        lifecycle_error(ErrorCode::database, "project lifecycle lock acquisition timed out");
-      }
-      const auto poll =
-          std::chrono::duration_cast<std::chrono::steady_clock::duration>(poll_interval);
-      std::this_thread::sleep_for(std::min(deadline - now, poll));
-    }
-  }
-
-  ProjectLifecycleLock(const ProjectLifecycleLock&) = delete;
-  ProjectLifecycleLock& operator=(const ProjectLifecycleLock&) = delete;
-  ProjectLifecycleLock(ProjectLifecycleLock&&) = delete;
-  ProjectLifecycleLock& operator=(ProjectLifecycleLock&&) = delete;
-
-  ~ProjectLifecycleLock() {
-    if (descriptor_ != -1) {
-      static_cast<void>(::flock(descriptor_, LOCK_UN));
-      close_descriptor();
-    }
-  }
-
-private:
-  void close_descriptor() noexcept {
-    if (descriptor_ != -1) {
-      static_cast<void>(::close(descriptor_));
-      descriptor_ = -1;
-    }
-  }
-
-  int descriptor_{-1};
-};
-
-sqlite::ConnectionSettings sqlite_settings(const Config& config) {
-  return sqlite::ConnectionSettings{config.lock_timeout, config.statement_timeout};
-}
-
-postgresql::ConnectionSettings postgresql_settings(const Config& config) {
-  return postgresql::ConnectionSettings{config.lock_timeout, config.statement_timeout};
-}
-
-ProjectInputs load_inputs(Config config, const Runtime& runtime) {
-  SourceResolver resolver{config.file.parent_path(), config.migrations, runtime.stdin_reader};
-  auto sources = resolver.resolve(config.sources);
-  auto migrations = load_migrations(config.migrations, config.backend);
-  return ProjectInputs{std::move(config), std::move(sources), std::move(migrations)};
-}
-
-std::string require_target_locator(const Config& config, const Runtime& runtime) {
-  if (config.database.empty()) {
-    lifecycle_error(ErrorCode::configuration,
-                    "this command requires database or database_env in the configuration");
-  }
-  const auto locator = resolve_locator(config.database, runtime.environment);
-  if (!locator || locator->empty()) {
-    lifecycle_error(ErrorCode::configuration, "configured database locator is unavailable");
-  }
-  return *locator;
-}
-
-std::filesystem::path sqlite_target_path(const Config& config, const Runtime& runtime) {
-  const auto locator = require_target_locator(config, runtime);
-  constexpr std::string_view prefix{"sqlite:"};
-  if (!std::string_view{locator}.starts_with(prefix)) {
-    lifecycle_error(ErrorCode::configuration, "SQLite database locators must start with 'sqlite:'");
-  }
-  const auto path_text = std::string_view{locator}.substr(prefix.size());
-  if (path_text.empty() || path_text == ":memory:" || path_text.starts_with("file:") ||
-      path_text.find_first_of("?#") != std::string_view::npos) {
-    lifecycle_error(ErrorCode::configuration,
-                    "SQLite target must be a plain persistent filesystem path");
-  }
-  std::filesystem::path path{path_text};
-  if (!path.is_absolute()) {
-    path = config.file.parent_path() / path;
-  }
-  return path.lexically_normal();
-}
-
-bool sqlite_target_exists(const std::filesystem::path& path) {
-  std::error_code error;
-  const auto status = std::filesystem::symlink_status(path, error);
-  if (error == std::errc::no_such_file_or_directory ||
-      status.type() == std::filesystem::file_type::not_found) {
-    return false;
-  }
-  if (error) {
-    lifecycle_error(ErrorCode::database, "cannot inspect SQLite target path: " + error.message());
-  }
-  if (std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
-    lifecycle_error(ErrorCode::database,
-                    "SQLite target must be a regular file and not a symbolic link");
-  }
-  return true;
-}
-
-std::string concatenate_sources(const SourceSet& sources) {
-  std::string sql;
-  for (const auto& source : sources.files) {
-    sql.push_back('\n');
-    sql.append(source.sql);
-    if (!sql.ends_with('\n')) {
-      sql.push_back('\n');
-    }
-  }
-  return sql;
-}
-
-struct AppliedPrefix {
-  std::size_t completed_versions{0};
-  std::optional<std::size_t> incomplete_unit_count;
-
-  bool operator==(const AppliedPrefix&) const = default;
-};
-
-template <typename History, typename ParseMigration, typename IsCompleted>
-AppliedPrefix validate_applied_history(const History& history,
-                                       const std::vector<MigrationFile>& migrations,
-                                       const BackendKind backend, ParseMigration parse_migration,
-                                       IsCompleted is_completed) {
-  if (!history.initialized) {
-    if (!history.entries.empty()) {
-      lifecycle_error(ErrorCode::database,
-                      "migration history has rows but its storage is not initialized");
-    }
-    return {};
-  }
-  if (history.entries.size() > migrations.size()) {
-    lifecycle_error(ErrorCode::drift,
-                    "database history contains migrations absent from the migration directory");
-  }
-
-  AppliedPrefix prefix;
-  for (std::size_t migration_index = 0; migration_index < history.entries.size();
-       ++migration_index) {
-    const auto& entry = history.entries[migration_index];
-    const auto& migration = migrations[migration_index];
-    if (entry.version != migration.metadata.version) {
-      lifecycle_error(ErrorCode::drift,
-                      "database migration history is not a prefix of the migration directory");
-    }
-    if (entry.backend != backend_name(backend)) {
-      lifecycle_error(ErrorCode::drift,
-                      "database migration history was written by a different backend");
-    }
-    if (entry.engine_version.empty() || entry.attempted_file_sha256.size() != 64U) {
-      lifecycle_error(ErrorCode::database,
-                      "database migration history contains invalid immutable metadata");
-    }
-    try {
-      validate_engine_version(backend, entry.engine_version);
-    } catch (const Error&) {
-      lifecycle_error(ErrorCode::database,
-                      "database migration history contains an invalid engine version");
-    }
-    if (backend == BackendKind::postgresql &&
-        postgresql::parse_server_version(entry.engine_version).major !=
-            postgresql::parse_server_version(migration.metadata.engine_version).major) {
-      lifecycle_error(ErrorCode::drift,
-                      "database migration history records another PostgreSQL major");
-    }
-
-    const auto parsed = parse_migration(migration.sql);
-    std::vector<std::string> completed_hashes;
-    bool saw_started = false;
-    for (std::size_t unit_index = 0; unit_index < entry.units.size(); ++unit_index) {
-      const auto& unit = entry.units[unit_index];
-      if (unit.ordinal != unit_index) {
-        lifecycle_error(ErrorCode::database,
-                        "database migration units are not a contiguous ordered prefix");
-      }
-      if (!is_completed(unit)) {
-        if (saw_started || unit_index + 1U != entry.units.size()) {
-          lifecycle_error(ErrorCode::database,
-                          "database migration history contains an invalid started unit");
-        }
-        saw_started = true;
-        continue;
-      }
-      if (saw_started || unit_index >= parsed.units.size()) {
-        lifecycle_error(ErrorCode::database,
-                        "database migration history contains an invalid completed unit");
-      }
-      if (unit.explicit_transaction != parsed.units[unit_index].explicit_transaction) {
-        lifecycle_error(ErrorCode::migration,
-                        "edited migration changes a completed transaction boundary");
-      }
-      completed_hashes.push_back(unit.exact_sha256);
-    }
-    validate_completed_prefix(completed_hashes, parsed);
-
-    if (entry.completed_file_sha256.has_value()) {
-      if (saw_started || completed_hashes.size() != parsed.units.size() ||
-          *entry.completed_file_sha256 != migration.exact_sha256 ||
-          entry.attempted_file_sha256 != *entry.completed_file_sha256) {
-        lifecycle_error(ErrorCode::migration, "completed migration '" + migration.metadata.version +
-                                                  "' differs from its database checksum");
-      }
-      ++prefix.completed_versions;
-      continue;
-    }
-
-    if (migration_index + 1U != history.entries.size()) {
-      lifecycle_error(ErrorCode::database,
-                      "an incomplete migration is followed by another history entry");
-    }
-    prefix.incomplete_unit_count = completed_hashes.size();
-  }
-  return prefix;
-}
-
-ParsedScript parse_sqlite_migration(std::string sql) {
-  auto statements = sqlite::scan_statements(sql);
-  return build_execution_units(std::move(sql), std::move(statements));
-}
-
-void require_migration_start(const MigrationFile& migration, const std::string_view before) {
-  if (migration.metadata.draft) {
-    lifecycle_error(ErrorCode::migration,
-                    "cannot reconstruct draft migration '" + migration.metadata.version + "'");
-  }
-  if (migration.metadata.from_sha256 != before) {
-    lifecycle_error(ErrorCode::migration, "migration '" + migration.metadata.version +
-                                              "' does not start from the reconstructed schema");
-  }
-}
-
-void require_migration_end(const MigrationFile& migration, const std::string_view after) {
-  if (migration.metadata.to_sha256 != after) {
-    lifecycle_error(ErrorCode::migration, "migration '" + migration.metadata.version +
-                                              "' does not produce its declared schema");
-  }
-}
-
-sqlite::SchemaSnapshot replay_sqlite(const std::vector<MigrationFile>& migrations,
-                                     sqlite::Database& database) {
-  auto snapshot = database.inspect();
-  for (const auto& migration : migrations) {
-    require_migration_start(migration, snapshot.semantic_hash);
-    database.execute_migration(migration.sql);
-    snapshot = database.inspect();
-    require_migration_end(migration, snapshot.semantic_hash);
-  }
-  return snapshot;
-}
-
-struct SqlitePrefixReconstruction {
-  AppliedPrefix prefix;
-  sqlite::SchemaSnapshot snapshot;
-};
-
-SqlitePrefixReconstruction reconstruct_sqlite_prefix(const sqlite::MigrationHistory& history,
-                                                     const std::vector<MigrationFile>& migrations,
-                                                     sqlite::Database& database) {
-  const auto prefix =
-      validate_applied_history(history, migrations, BackendKind::sqlite, parse_sqlite_migration,
-                               [](const sqlite::MigrationUnitRecord& unit) {
-                                 return unit.state == sqlite::MigrationUnitState::completed;
-                               });
-
-  auto snapshot = database.inspect();
-  for (std::size_t index = 0; index < prefix.completed_versions; ++index) {
-    const auto& migration = migrations[index];
-    require_migration_start(migration, snapshot.semantic_hash);
-    database.execute_migration(migration.sql);
-    snapshot = database.inspect();
-    require_migration_end(migration, snapshot.semantic_hash);
-  }
-  if (prefix.incomplete_unit_count.has_value()) {
-    const auto& migration = migrations[prefix.completed_versions];
-    require_migration_start(migration, snapshot.semantic_hash);
-    database.execute_prefix(migration.sql, *prefix.incomplete_unit_count);
-    snapshot = database.inspect();
-  }
-  return SqlitePrefixReconstruction{prefix, std::move(snapshot)};
-}
-
-int docker_major_from_image(const std::string_view image) {
-  const auto colon = image.rfind(':');
-  if (colon == std::string_view::npos) {
-    return 18;
-  }
-  const auto tag = image.substr(colon + 1U);
-  for (const int major : {15, 16, 17, 18}) {
-    const auto text = std::to_string(major);
-    if (tag == text || tag.starts_with(text + "-") || tag.starts_with(text + ".")) {
-      return major;
-    }
-  }
-  return 18;
-}
-
-struct PostgresProvisioning {
-  std::string locator;
-  std::optional<docker::PostgresContainer> container;
-};
-
-PostgresProvisioning provision_postgresql(const Config& config, const Runtime& runtime) {
-  if (!config.scratch.locator.empty()) {
-    const auto locator = resolve_locator(config.scratch.locator, runtime.environment);
-    if (!locator) {
-      lifecycle_error(ErrorCode::configuration, "PostgreSQL scratch locator is missing");
-    }
-    return PostgresProvisioning{*locator, std::nullopt};
-  }
-  if (config.scratch.docker) {
-    docker::PostgresContainerOptions options;
-    options.image = config.scratch.docker->image;
-    options.postgres_major = docker_major_from_image(config.scratch.docker->image);
-    auto container = docker::PostgresContainer::create(std::move(options));
-    auto locator = container.connection_dsn();
-    return PostgresProvisioning{std::move(locator), std::move(container)};
-  }
-  lifecycle_error(ErrorCode::configuration,
-                  "PostgreSQL create requires scratch.database, scratch.database_env, or "
-                  "scratch.docker");
-}
-
-postgresql::SchemaSnapshot replay_postgresql(const std::vector<MigrationFile>& migrations,
-                                             postgresql::ScratchDatabase& database,
-                                             const std::vector<std::string>& managed_schemas) {
-  auto snapshot = database.introspect(managed_schemas);
-  for (const auto& migration : migrations) {
-    if (postgresql::parse_server_version(migration.metadata.engine_version).major !=
-        snapshot.server_version.major) {
-      lifecycle_error(ErrorCode::unsupported, "migration '" + migration.metadata.version +
-                                                  "' targets a different PostgreSQL major");
-    }
-    require_migration_start(migration, snapshot.semantic_hash);
-    database.execute_migration(migration.sql);
-    snapshot = database.introspect(managed_schemas);
-    require_migration_end(migration, snapshot.semantic_hash);
-  }
-  return snapshot;
-}
-
-struct PostgresPrefixReconstruction {
-  AppliedPrefix prefix;
-  postgresql::SchemaSnapshot snapshot;
-};
-
-PostgresPrefixReconstruction reconstruct_postgresql_prefix(
-    const postgresql::MigrationHistory& history, const std::vector<MigrationFile>& migrations,
-    postgresql::ScratchDatabase& scratch, const std::vector<std::string>& managed_schemas) {
-  const auto prefix = validate_applied_history(
-      history, migrations, BackendKind::postgresql, postgresql::parse_migration,
-      [](const postgresql::MigrationUnitRecord& unit) {
-        return unit.state == postgresql::MigrationUnitState::completed;
-      });
-
-  auto snapshot = scratch.introspect(managed_schemas);
-  for (std::size_t index = 0; index < prefix.completed_versions; ++index) {
-    const auto& migration = migrations[index];
-    if (postgresql::parse_server_version(migration.metadata.engine_version).major !=
-        snapshot.server_version.major) {
-      lifecycle_error(ErrorCode::unsupported, "migration '" + migration.metadata.version +
-                                                  "' targets a different PostgreSQL major");
-    }
-    require_migration_start(migration, snapshot.semantic_hash);
-    scratch.execute_migration(migration.sql);
-    snapshot = scratch.introspect(managed_schemas);
-    require_migration_end(migration, snapshot.semantic_hash);
-  }
-  if (prefix.incomplete_unit_count.has_value()) {
-    const auto& migration = migrations[prefix.completed_versions];
-    require_migration_start(migration, snapshot.semantic_hash);
-    scratch.execute_prefix(migration.sql, *prefix.incomplete_unit_count);
-    snapshot = scratch.introspect(managed_schemas);
-  }
-  return PostgresPrefixReconstruction{prefix, std::move(snapshot)};
-}
 
 MigrationMetadata metadata_for(const Config& config, const std::string& version,
                                const std::string& engine_version, const std::string& from_hash,
@@ -658,9 +242,10 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
 
   const auto history = target ? target->read_history() : sqlite::MigrationHistory{};
   auto prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
-  const auto prefix = reconstruct_sqlite_prefix(history, project.migrations, prefix_database);
   const auto live = target ? target->inspect()
                            : sqlite::Database::temporary(sqlite_settings(project.config)).inspect();
+  const auto prefix =
+      reconstruct_sqlite_prefix(history, project.migrations, prefix_database, live.semantic_hash);
   if (live.semantic_hash != prefix.snapshot.semantic_hash) {
     lifecycle_error(ErrorCode::drift,
                     "live SQLite schema differs from its reconstructed migration prefix");
@@ -699,10 +284,11 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
 
   const auto repeated_history = target->read_history();
   auto repeated_prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
-  const auto repeated =
-      reconstruct_sqlite_prefix(repeated_history, project.migrations, repeated_prefix_database);
-  if (repeated.prefix != prefix.prefix ||
-      target->inspect().semantic_hash != repeated.snapshot.semantic_hash) {
+  const auto repeated_live = target->inspect();
+  const auto repeated = reconstruct_sqlite_prefix(
+      repeated_history, project.migrations, repeated_prefix_database, repeated_live.semantic_hash);
+  if (repeated_history != history || repeated.prefix != prefix.prefix ||
+      repeated_live.semantic_hash != repeated.snapshot.semantic_hash) {
     lifecycle_error(ErrorCode::drift,
                     "SQLite target changed after validation and before migration execution");
   }
@@ -714,33 +300,6 @@ ApplyResult apply_sqlite(ProjectInputs& project, const ApplyOptions& options,
                     "applied SQLite target does not match reconstructed migration history");
   }
   return ApplyResult{pending, applied, false};
-}
-
-StatusResult status_sqlite(ProjectInputs& project, const Runtime& runtime) {
-  static_cast<void>(require_complete_sqlite_reconstruction(project));
-  const auto path = sqlite_target_path(project.config, runtime);
-  if (!sqlite_target_exists(path)) {
-    return StatusResult{ProjectStatus::missing_database, 0, project.migrations.size(),
-                        "SQLite database is missing"};
-  }
-
-  auto target =
-      sqlite::Database::open(path, sqlite::OpenMode::read_only, sqlite_settings(project.config));
-  auto prefix_database = sqlite::Database::temporary(sqlite_settings(project.config));
-  const auto prefix =
-      reconstruct_sqlite_prefix(target.read_history(), project.migrations, prefix_database);
-  if (target.inspect().semantic_hash != prefix.snapshot.semantic_hash) {
-    return StatusResult{ProjectStatus::drift, prefix.prefix.completed_versions,
-                        project.migrations.size(),
-                        "Live SQLite schema has drifted from its recorded migration prefix"};
-  }
-  if (prefix.prefix.completed_versions != project.migrations.size() ||
-      prefix.prefix.incomplete_unit_count.has_value()) {
-    return StatusResult{ProjectStatus::pending, prefix.prefix.completed_versions,
-                        project.migrations.size(), "SQLite migrations are pending"};
-  }
-  return StatusResult{ProjectStatus::converged, prefix.prefix.completed_versions,
-                      project.migrations.size(), "SQLite schema is converged"};
 }
 
 postgresql::SchemaSnapshot
@@ -856,35 +415,6 @@ ApplyResult apply_postgresql(ProjectInputs& project, const ApplyOptions& options
   return ApplyResult{pending, applied, false};
 }
 
-StatusResult status_postgresql(ProjectInputs& project, const Runtime& runtime) {
-  auto provisioning = provision_postgresql(project.config, runtime);
-  const auto desired = require_complete_postgresql_reconstruction(project, provisioning);
-  auto target = postgresql::Database::open(require_target_locator(project.config, runtime),
-                                           postgresql_settings(project.config));
-  const auto lifecycle_lock = target.acquire_lifecycle_lock();
-  if (target.server_version().major != desired.server_version.major) {
-    lifecycle_error(ErrorCode::unsupported,
-                    "target and scratch PostgreSQL major versions must match");
-  }
-  auto prefix_database = postgresql::ScratchDatabase::create(provisioning.locator,
-                                                             postgresql_settings(project.config));
-  const auto prefix = reconstruct_postgresql_prefix(
-      target.read_history(), project.migrations, prefix_database, project.config.managed_schemas);
-  if (target.introspect(project.config.managed_schemas).semantic_hash !=
-      prefix.snapshot.semantic_hash) {
-    return StatusResult{ProjectStatus::drift, prefix.prefix.completed_versions,
-                        project.migrations.size(),
-                        "Live PostgreSQL schema has drifted from its recorded migration prefix"};
-  }
-  if (prefix.prefix.completed_versions != project.migrations.size() ||
-      prefix.prefix.incomplete_unit_count.has_value()) {
-    return StatusResult{ProjectStatus::pending, prefix.prefix.completed_versions,
-                        project.migrations.size(), "PostgreSQL migrations are pending"};
-  }
-  return StatusResult{ProjectStatus::converged, prefix.prefix.completed_versions,
-                      project.migrations.size(), "PostgreSQL schema is converged"};
-}
-
 template <typename Revision>
 std::vector<RecoveredRevision> convert_revisions(const std::vector<Revision>& revisions,
                                                  const std::string_view version) {
@@ -998,16 +528,6 @@ ApplyResult apply_migrations(const ApplyOptions& options, const Runtime& runtime
     return apply_sqlite(project, options, runtime);
   }
   return apply_postgresql(project, options, runtime);
-}
-
-StatusResult project_status(const std::filesystem::path& config_file, const Runtime& runtime) {
-  auto config = load_config(config_file);
-  const ProjectLifecycleLock lifecycle_lock{config.file, config.lock_timeout};
-  auto project = load_inputs(std::move(config), runtime);
-  if (project.config.backend == BackendKind::sqlite) {
-    return status_sqlite(project, runtime);
-  }
-  return status_postgresql(project, runtime);
 }
 
 std::vector<RecoveredRevision> recover_migration(const RecoverOptions& options,

@@ -340,11 +340,20 @@ when the last attempt is incomplete; it is rejected when there is nothing incomp
 
 ```sh
 dbdiff status
+dbdiff status --quick
 ```
 
-`status` performs the same history-prefix and live-drift checks without applying anything. It exits
-0 only when the target is converged. Pending migrations, drift, or a missing target are reported as
-action-required status 2.
+By default, `status` validates the migration files and recorded history, reconstructs only the
+applied prefix, and checks the live schema for drift. It does not read declarative sources or
+execute pending migrations. PostgreSQL verification uses one scratch database. It exits 0 when
+all migrations are complete and the live schema matches their reconstructed state. Pending or
+incomplete migrations, drift, or a missing SQLite target are reported as action-required status 2.
+
+`--quick` reads migration files and database history without inspecting the live schema or
+provisioning scratch databases. It works when declarative sources or scratch infrastructure are
+unavailable. It exits 0 when all migrations are recorded as applied and 2 when work is pending or
+incomplete, and explicitly reports that drift was not checked. Use default `status` to verify
+convergence; `create` and `apply` still validate the declarative master schema.
 
 ### `recover`
 
@@ -366,12 +375,18 @@ List output is tab-separated: migration version, zero-based revision ordinal, an
 
 ### Exit behavior
 
-- `0`: command succeeded; for `status`, the target is converged.
+- `0`: command succeeded; default `status` verified convergence, while `status --quick` found all
+  migrations recorded as applied without checking drift.
 - `1`: dbdiff configuration, validation, database, or execution failure.
 - `2`: `status` completed successfully but found action required.
 - Other nonzero values may be returned by CLI argument parsing errors.
 
 ## Migration files
+
+Schema fingerprints use the corrected SQLite v2 and PostgreSQL v3 representations. Migration
+chains generated with the earlier fingerprints must be regenerated for disposable projects;
+there is no legacy-hash fallback. dbdiff does not rewrite migration files or database history
+automatically. The SQL metadata and YAML configuration formats remain version 1.
 
 Migrations are UTF-8 files named `YYYYMMDDHHMMSS_slug.sql` and loaded in lexical order. Symlinks are
 not accepted. Each file begins with strict metadata using the exact `-- dbdiff: key=value` form:
@@ -440,6 +455,21 @@ Changes use native ALTER when it is safe and deterministic; other supported tabl
 transactional rebuild that preserves mapped rows, accessible rowids, `sqlite_sequence`, foreign
 keys, indexes, views, and triggers.
 
+Rebuild copies use `INSERT OR ABORT`, so a destination conflict policy such as `IGNORE` or
+`REPLACE` cannot silently discard or replace existing rows. Constraint failures roll back the
+rebuild; `apply --validate-data` detects them on the validation copy before live writes.
+
+Schema normalization ignores formatting and normalizes identifier quotes in declaration
+positions. Quoted expressions retain their exact contents and quote kind, including SQLite's
+double-quoted string behavior. Ambiguous quote changes may therefore produce an extra migration
+instead of being assumed equivalent.
+
+For hand-edited SQL that combines `PRAGMA foreign_key_check` with deferred foreign keys, place
+`PRAGMA defer_foreign_keys=ON` after the check and immediately before `BEGIN`. When the application
+schema has no foreign keys yet, a schema-wide check can reset deferral differently in scratch
+reconstruction and a target containing dbdiff metadata. This can make live apply reject a transaction
+that passed dry-run; generated migrations do not use this ordering.
+
 Temporary, attached, virtual, shadow, and reserved metadata objects are outside the managed scope.
 Changes needing an unknown data mapping or an unverifiable rowid transition fail closed.
 
@@ -456,7 +486,8 @@ schema planning are implemented. The current semantic snapshot and planner manag
 - primary-key, unique, check, and foreign-key constraints, plus named `NOT NULL` constraints on
   PostgreSQL 18;
 - standalone indexes, including expression and partial keys, sort/null ordering, `INCLUDE`, access
-  method, uniqueness, and `NULLS NOT DISTINCT`; and
+  method, uniqueness, `NULLS NOT DISTINCT`, built-in operator classes and their parameters, and
+  built-in index collations; and
 - row-security policies for `PUBLIC`, including command, permissiveness, and `USING`/`WITH CHECK`
   expressions.
 
@@ -474,6 +505,12 @@ persistent PostgreSQL statement does not by itself make that object part of the 
 model.
 
 ## Building
+
+The backend implementations separate connection/runtime helpers, SQL parsing, schema inspection
+and fingerprints, planning/rendering, and migration history/recovery. PostgreSQL scratch ownership
+is a separate module. Private implementation headers remain under `src`; the public interfaces
+remain under `include/dbdiff`. Application modules separately handle project inputs, reconstruction,
+and status, while `create` and `apply` retain their full validation gates.
 
 The baseline is Ubuntu 24.04, C++20, and the CMake version shipped by that distribution; the project
 itself requires CMake 3.24 or newer. The checked-in presets use Ninja.
@@ -568,7 +605,12 @@ ctest --test-dir build/debug --output-on-failure -L integration.sqlite
 DBDIFF_TEST_POSTGRES_MAJOR=18 ctest --test-dir build/debug --output-on-failure \
   -L integration.postgresql
 bash tests/scripts/validate_requirements.sh --strict --build-dir build/debug
+npm run test:npm
 ```
+
+CI runs the npm installer and launcher tests on Ubuntu and macOS with Node.js 22, without running
+postinstall or downloading a release binary. Backend regressions independently inspect row data
+and PostgreSQL catalog properties as well as dbdiff's fingerprints.
 
 The requirements matrix separates supported scope from planned work. Its evidence map names exact
 registered unit, integration, and manual scenarios. Strict validation checks each supported row's

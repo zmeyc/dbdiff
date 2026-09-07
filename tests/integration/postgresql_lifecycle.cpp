@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -563,5 +564,145 @@ CREATE POLICY sessions_visible
     CHECK(history.entries[0].completed_file_sha256 == migration.exact_sha256);
     CHECK(history.entries[1].completed_file_sha256 == second_migration.exact_sha256);
   }
+  CHECK(scratch_database_count(container, runner) == "0");
+}
+
+TEST_CASE("PostgreSQL indexes preserve operator classes collations and parameters",
+          "[integration][docker][postgresql][planner][hash][PG-015][APP-007][APP-008]") {
+  auto runner = docker::make_system_process_runner();
+  if (!runner->run({"docker", "info", "--format", "{{.ServerVersion}}"}, 10s).succeeded()) {
+    SKIP("Docker CLI or daemon is unavailable");
+  }
+  docker::PostgresContainerOptions options;
+  options.postgres_major = selected_major();
+  if (const char* image =
+          std::getenv("DBDIFF_TEST_POSTGRES_IMAGE"); // NOLINT(concurrency-mt-unsafe)
+      image != nullptr && *image != '\0') {
+    options.image = image;
+  }
+  auto container = docker::PostgresContainer::create(options, runner);
+  dbdiff::test::TempDirectory project;
+  const auto locator = container.connection_dsn();
+  const auto config_text = postgres_config(locator);
+  const auto config = project.write("dbdiff.yaml", config_text);
+  std::size_t missing_scratch_lookups = 0U;
+  const dbdiff::Runtime runtime{
+      .environment = [&](const std::string_view name) -> std::optional<std::string> {
+        if (name == "DBDIFF_INTEGRATION_TARGET") {
+          return locator;
+        }
+        ++missing_scratch_lookups;
+        return std::nullopt;
+      },
+      .stdin_reader = [] { return std::string{}; },
+      .now = [] { return std::chrono::system_clock::time_point{}; },
+  };
+  const std::string original = R"sql(
+CREATE TABLE public.items(id integer, name text, payload jsonb);
+CREATE INDEX name_idx ON public.items
+  (name COLLATE "C" text_pattern_ops DESC NULLS LAST) INCLUDE(id) WHERE name IS NOT NULL;
+CREATE INDEX payload_idx ON public.items USING gin (payload jsonb_path_ops);
+CREATE INDEX ranges_idx ON public.items USING brin
+  (id int4_minmax_multi_ops (values_per_range=64));
+CREATE INDEX "expression(with, punctuation)" ON public.items
+  (lower(replace(name, ',', ')')) COLLATE "C" text_pattern_ops);
+)sql";
+  project.write("schema/items.sql", original);
+
+  const auto catalog = [&] {
+    const auto result = runner->run(
+        {"docker", "exec", std::string{container.container_id()}, "psql", "--username",
+         std::string{container.username()}, "--dbname", std::string{container.database()},
+         "--tuples-only", "--no-align", "--command",
+         "SELECT ci.relname, opc.opcname, coalesce(coll.collname, '-'), "
+         "coalesce(a.attoptions::text, '-') "
+         "FROM pg_catalog.pg_index i "
+         "JOIN pg_catalog.pg_class ci ON ci.oid=i.indexrelid "
+         "JOIN pg_catalog.pg_class ct ON ct.oid=i.indrelid "
+         "JOIN pg_catalog.pg_namespace n ON n.oid=ct.relnamespace "
+         "JOIN pg_catalog.pg_opclass opc ON opc.oid=i.indclass[0] "
+         "LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=i.indcollation[0] "
+         "JOIN pg_catalog.pg_attribute a ON a.attrelid=ci.oid AND a.attnum=1 "
+         "WHERE n.nspname='public' AND ct.relname='items' ORDER BY ci.relname COLLATE \"C\""},
+        30s);
+    REQUIRE(result.succeeded());
+    return trim_ascii(result.standard_output);
+  };
+  const auto created = dbdiff::create_migration(
+      dbdiff::CreateOptions{config, "index properties", {dbdiff::Hazard::write_lock}}, runtime);
+  REQUIRE(created.created);
+  REQUIRE(dbdiff::apply_migrations(dbdiff::ApplyOptions{config}, runtime).applied == 1U);
+  // These assertions read raw catalogs through psql, independently of dbdiff's snapshot/hash.
+  const auto first_catalog = catalog();
+  CHECK(first_catalog.find("name_idx|text_pattern_ops|C|-") != std::string::npos);
+  CHECK(first_catalog.find("payload_idx|jsonb_path_ops|-|-") != std::string::npos);
+  CHECK(first_catalog.find("ranges_idx|int4_minmax_multi_ops|-|{values_per_range=64}") !=
+        std::string::npos);
+  CHECK(first_catalog.find("expression(with, punctuation)|text_pattern_ops|C|-") !=
+        std::string::npos);
+
+  std::string updated = original;
+  const auto replace_one = [&](const std::string& from, const std::string& to) {
+    const auto position = updated.find(from);
+    REQUIRE(position != std::string::npos);
+    updated.replace(position, from.size(), to);
+  };
+  replace_one("name COLLATE \"C\" text_pattern_ops", "name COLLATE \"POSIX\" text_ops");
+  replace_one("payload jsonb_path_ops", "payload jsonb_ops");
+  replace_one("values_per_range=64", "values_per_range=128");
+  project.write("schema/items.sql", updated);
+  const auto changed = dbdiff::create_migration(
+      dbdiff::CreateOptions{config, "change index properties", {dbdiff::Hazard::write_lock}},
+      runtime);
+  REQUIRE(changed.created);
+  REQUIRE(dbdiff::apply_migrations(dbdiff::ApplyOptions{config}, runtime).applied == 1U);
+  const auto second_catalog = catalog();
+  CHECK(second_catalog.find("name_idx|text_ops|POSIX|-") != std::string::npos);
+  CHECK(second_catalog.find("payload_idx|jsonb_ops|-|-") != std::string::npos);
+  CHECK(second_catalog.find("ranges_idx|int4_minmax_multi_ops|-|{values_per_range=128}") !=
+        std::string::npos);
+  CHECK_FALSE(dbdiff::create_migration(
+                  dbdiff::CreateOptions{config, "unchanged", {dbdiff::Hazard::write_lock}}, runtime)
+                  .created);
+
+  auto unavailable_sources = config_text;
+  unavailable_sources.replace(unavailable_sources.find("  - schema\n"),
+                              std::string{"  - schema\n"}.size(), "  - unavailable_schema\n");
+  const auto status_config = project.write("status.yaml", unavailable_sources);
+  const auto verified = dbdiff::project_status(status_config, runtime);
+  CHECK(verified.status == dbdiff::ProjectStatus::converged);
+  CHECK(verified.drift_checked);
+
+  auto pending = dbdiff::load_migration(changed.file, dbdiff::BackendKind::postgresql).metadata;
+  pending.version = "20990101000000_invalid_pending";
+  pending.from_sha256 = pending.to_sha256;
+  const auto pending_file = project.write("migrations/" + pending.version + ".sql",
+                                          dbdiff::render_migration_metadata(pending) +
+                                              "THIS IS INTENTIONALLY INVALID SQL;\n");
+  CHECK(dbdiff::project_status(status_config, runtime).status == dbdiff::ProjectStatus::pending);
+  REQUIRE(std::filesystem::remove(pending_file));
+
+  auto unavailable_scratch = unavailable_sources;
+  const auto scratch_begin = unavailable_scratch.find("scratch:\n");
+  unavailable_scratch.replace(scratch_begin,
+                              unavailable_scratch.find("managed_schemas:\n") - scratch_begin,
+                              "scratch:\n  database_env: DBDIFF_MISSING_SCRATCH\n");
+  const auto quick_config = project.write("quick.yaml", unavailable_scratch);
+  const auto quick = dbdiff::project_status(dbdiff::StatusOptions{quick_config, true}, runtime);
+  CHECK(quick.status == dbdiff::ProjectStatus::history_up_to_date);
+  CHECK_FALSE(quick.drift_checked);
+  CHECK(missing_scratch_lookups == 0U);
+
+  {
+    auto target = postgresql::Database::open(locator);
+    target.execute_migration("DROP INDEX public.payload_idx; "
+                             "CREATE INDEX payload_idx ON public.items USING gin "
+                             "(payload jsonb_path_ops);");
+  }
+  CHECK(dbdiff::project_status(status_config, runtime).status == dbdiff::ProjectStatus::drift);
+  const auto quick_drift =
+      dbdiff::project_status(dbdiff::StatusOptions{quick_config, true}, runtime);
+  CHECK(quick_drift.status == dbdiff::ProjectStatus::history_up_to_date);
+  CHECK_FALSE(quick_drift.drift_checked);
   CHECK(scratch_database_count(container, runner) == "0");
 }

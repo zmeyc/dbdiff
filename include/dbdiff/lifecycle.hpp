@@ -51,13 +51,19 @@ struct ApplyResult {
   bool dry_run{false};
 };
 
-enum class ProjectStatus { converged, pending, drift, missing_database };
+struct StatusOptions {
+  std::filesystem::path config_file;
+  bool quick{false};
+};
+
+enum class ProjectStatus { converged, history_up_to_date, pending, drift, missing_database };
 
 struct StatusResult {
   ProjectStatus status{ProjectStatus::converged};
   std::size_t applied{0};
   std::size_t total{0};
   std::string detail;
+  bool drift_checked{false};
 };
 
 struct RecoverOptions {
@@ -76,6 +82,8 @@ struct RecoveredRevision {
                                             const Runtime& runtime = default_runtime());
 [[nodiscard]] ApplyResult apply_migrations(const ApplyOptions& options,
                                            const Runtime& runtime = default_runtime());
+[[nodiscard]] StatusResult project_status(const StatusOptions& options,
+                                          const Runtime& runtime = default_runtime());
 [[nodiscard]] StatusResult project_status(const std::filesystem::path& config_file,
                                           const Runtime& runtime = default_runtime());
 [[nodiscard]] std::vector<RecoveredRevision>

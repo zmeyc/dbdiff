@@ -156,6 +156,7 @@ struct Index {
   std::string method{"btree"};
   bool unique{false};
   bool nulls_not_distinct{false};
+  // Complete canonical key SQL, including collation, operator class/options and ordering.
   std::vector<std::string> key_expressions;
   std::vector<std::string> included_columns;
   std::optional<std::string> predicate;
